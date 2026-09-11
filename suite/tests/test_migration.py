@@ -10,7 +10,8 @@ node, so it exercises the same metadata-copying path as move-volume - which is
 exactly where backends that keep state in extended attributes come apart.
 """
 
-from conftest import needs_lxc, needs_images, needs_snapshots
+from conftest import (needs_lxc, needs_images, needs_snapshots,
+                      needs_snapshot_migration)
 from helpers.data_guard import DataGuard
 from helpers.load import VerifiedLoad
 from helpers.wait import wait_for, wait_for_task
@@ -73,6 +74,7 @@ class TestVMMigration:
         guard.verify("after migrating there and back")
 
     @needs_snapshots
+    @needs_snapshot_migration
     def test_snapshot_survives_migration(self, create_vm, pve, node, node2):
         """Snapshots are backend state rather than config, so they are the
         thing most likely to be silently dropped by a migration."""

@@ -37,9 +37,37 @@ ln -s link-target.txt symlink.txt
 ln -s /nonexistent dangling.txt
 
 # An extended attribute in the user namespace, which every filesystem here
-# supports - unlike the filesystem-internal ones.
+# supports - unlike the filesystem-internal ones. Written through python3
+# rather than setfattr: the Debian container template ships python3 and does
+# not ship attr, and a missing setfattr took the whole fixture down with exit
+# 127 - after the getfattr in the fingerprint had already been silently
+# reporting nothing.
 echo attred > xattr.txt
-setfattr -n user.lab.marker -v "kept" xattr.txt
+cat > /usr/local/bin/lab-xattr <<'LABXATTR'
+#!/usr/bin/env python3
+import os
+import sys
+
+if sys.argv[1] == "set":
+    os.setxattr(sys.argv[2], sys.argv[3], sys.argv[4].encode())
+else:
+    found = []
+    for dirpath, _, filenames in os.walk(sys.argv[2]):
+        names = [dirpath] + [os.path.join(dirpath, f) for f in filenames]
+        for name in names:
+            try:
+                attrs = os.listxattr(name, follow_symlinks=False)
+            except OSError:
+                continue
+            for attr in attrs:
+                if not attr.startswith("user."):
+                    continue
+                value = os.getxattr(name, attr, follow_symlinks=False)
+                found.append("%s|%s|%s" % (name, attr, value.decode("utf-8", "replace")))
+    print("\n".join(sorted(found)))
+LABXATTR
+chmod 0755 /usr/local/bin/lab-xattr
+/usr/local/bin/lab-xattr set xattr.txt user.lab.marker kept
 
 # A file with holes, and a timestamp far in the past.
 truncate -s 4M sparse.bin
@@ -59,8 +87,7 @@ FINGERPRINT = (
     "echo '--links--' && "
     "find . -type f -links +1 -printf '%p|%n\\n' | sort && "
     "echo '--xattr--' && "
-    "getfattr -R -d -m 'user\\.' --absolute-names . 2>/dev/null "
-    "| grep -v '^#' | grep . | sort && "
+    "/usr/local/bin/lab-xattr list . && "
     "echo '--times--' && "
     "find . -printf '%p|%T@\\n' | sort"
 )

@@ -75,6 +75,7 @@ needs_vmstate = pytest.mark.vmstate
 needs_tpm = pytest.mark.tpm
 needs_guest_visible_vm_size = pytest.mark.vm_resize_visible
 needs_guest_visible_ct_size = pytest.mark.ct_resize_visible
+needs_snapshot_migration = pytest.mark.snapshot_migration
 
 CAPABILITY_MARKERS = {
     "snapshots": "takes and rolls back snapshots",
@@ -89,6 +90,7 @@ CAPABILITY_MARKERS = {
     "vm_resize_visible": "a VM disk resize is visible inside the guest",
     "ct_resize_visible": "a container rootfs resize is visible inside it",
     "crossstorage": "moves volumes between two storages",
+    "snapshot_migration": "migrating a guest that has snapshots",
 }
 
 
@@ -248,6 +250,14 @@ class LabGuest:
                  desc=f"{self.kind} {self.vmid} to stop")
 
     def destroy(self) -> None:
+        # A rollback or a migration releases the config lock a moment after
+        # its task ends, and stop refuses while it is held - so the stop was
+        # swallowed and delete then failed with "is running".
+        try:
+            wait_for(lambda: not self.config().get("lock"), timeout=120,
+                     desc=f"{self.kind} {self.vmid} lock to clear before destroy")
+        except Exception:                      # noqa: BLE001 - best effort
+            pass
         try:
             if self.status() == "running":
                 self.stop()

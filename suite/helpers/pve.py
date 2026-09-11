@@ -55,7 +55,18 @@ class PVE:
         try:
             return json.loads(out)
         except json.JSONDecodeError:
-            # Some endpoints print a bare UPID rather than JSON.
+            pass
+
+        # A task-starting endpoint streams the task's log to stdout and prints
+        # the UPID on the last line, so the whole blob is not JSON - and pvesh
+        # exits 0 even when the task it just watched failed. Returning the blob
+        # meant callers handed wait_for_task something that did not start with
+        # "UPID", which it quietly ignored: a migration could abort and the
+        # test would sail past it, to fail later on something unrelated.
+        last = out.splitlines()[-1].strip()
+        try:
+            return json.loads(last)
+        except json.JSONDecodeError:
             return out
 
     # `_timeout` is popped rather than passed to pvesh: an operation that
@@ -65,13 +76,16 @@ class PVE:
         return self._run("get", path, params, params.pop("_timeout", None))
 
     def create(self, path, **params):
-        return self._run("create", path, params, params.pop("_timeout", None))
+        timeout = params.pop("_timeout", None)
+        return self._run("create", path, params, timeout)
 
     def set(self, path, **params):
-        return self._run("set", path, params, params.pop("_timeout", None))
+        timeout = params.pop("_timeout", None)
+        return self._run("set", path, params, timeout)
 
     def delete(self, path, **params):
-        return self._run("delete", path, params, params.pop("_timeout", None))
+        timeout = params.pop("_timeout", None)
+        return self._run("delete", path, params, timeout)
 
     # ── Convenience ──────────────────────────────────────────────────────────
 

@@ -42,13 +42,25 @@ def _start_counter(agent) -> None:
     when the snapshot was taken - which a disk-only rollback cannot do, because
     the process would have been restarted.
     """
+    # Written to a temporary file and renamed, because `echo > file` truncates
+    # first: a read landing in that window returns an empty file, which read
+    # as 0 and made the rollback look like it had restored nothing.
     agent.run(
         f"nohup bash -c 'i=0; while true; do i=$((i+1)); "
-        f"echo $i > {COUNTER}; sleep 1; done' >/dev/null 2>&1 & echo started")
+        f"echo $i > {COUNTER}.tmp; mv {COUNTER}.tmp {COUNTER}; sleep 1; done' "
+        f">/dev/null 2>&1 & echo started")
 
 
 def _counter(agent) -> int:
-    return int(agent.run(f"cat {COUNTER}").strip() or 0)
+    """Never silently 0. A blank read means the file was caught mid-write, and
+    treating that as a value is how a working rollback got reported as one
+    that restored only the disk."""
+    for _ in range(5):
+        raw = agent.run(f"cat {COUNTER}").strip()
+        if raw.isdigit():
+            return int(raw)
+        time.sleep(0.5)
+    raise AssertionError(f"{COUNTER} never read back as a number (last: {raw!r})")
 
 
 class TestVMStateSnapshots:

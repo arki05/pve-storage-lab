@@ -29,8 +29,16 @@ def wait_for_task(pve, upid, timeout: int = 300) -> None:
     next test takes the same VMID from /cluster/nextid while the previous
     volume is still on disk.
     """
-    if not isinstance(upid, str) or not upid.startswith("UPID"):
+    if upid is None or isinstance(upid, (dict, list)):
         return
+    if not isinstance(upid, str) or not upid.startswith("UPID"):
+        # Deliberately loud. This used to return quietly, which turned every
+        # "we waited for the task" into a no-op the moment pvesh printed
+        # something other than a bare UPID - and an aborted migration then
+        # looked like a lock that never cleared.
+        raise RuntimeError(
+            f"expected a UPID to wait on, got {type(upid).__name__}: "
+            f"{str(upid)[:300]}")
 
     # A UPID carries the node it ran on: UPID:<node>:<pid>:<pstart>:<start>:...
     # Asking any other node for it is a 500, which is how every migration test

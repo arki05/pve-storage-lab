@@ -15,3 +15,9 @@ profile = "lvm-thin"
 marker = "linked_clone"
 kind = "limitation"
 reason = "clones are full copies here"
+
+[[expected]]
+profile = "lvm-thin"
+marker = "snapshot_migration"
+kind = "limitation"
+reason = "a thin LV's snapshots are separate LVs with no stream format that carries them, so PVE refuses the migration up front with 'non-migratable snapshot exists' - verified directly, not assumed"
