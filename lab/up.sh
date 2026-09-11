@@ -21,6 +21,7 @@
 # whole lab run inside an unprivileged container.
 #
 #   up.sh [--name lab] [--disks 4] [--disk-size 8G] [--mem 6144] [--cpus 4]
+#         [--reuse]   keep the previous lab's overlay and test disks
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
@@ -42,6 +43,7 @@ LAB_MAC="${LAB_MAC:-52:54:00:1a:b0:01}"
 # .20 upward so they can never take the address the forwards point at.
 LAB_NODE_IP="${LAB_NODE_IP:-10.0.2.10}"
 FRESH=0
+REUSE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -52,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --cpus)      CPUS="$2";      shift 2 ;;
         --ssh-port)  SSH_PORT="$2";  shift 2 ;;
         --fresh)     FRESH=1;        shift ;;
+        --reuse)     REUSE=1;        shift ;;
         --variant)   IMAGE_VARIANT="$2"; shift 2 ;;
         -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
         *)           die "unknown argument: $1" ;;
@@ -79,6 +82,15 @@ fi
 
 [[ $FRESH -eq 1 ]] && rm -rf "$LAB"
 mkdir -p "$LAB"
+
+# Starting a lab that is not currently running discards the previous one's
+# overlay and disks unless --reuse is given. They are stale in two ways: they
+# hold a previous run's filesystems, and they accumulate - test disks fill as
+# tests write to them, so a handful of runs quietly consumed 21 GB of the
+# runner before this existed. A lab is meant to be throwaway.
+if [[ $REUSE -eq 0 ]]; then
+    rm -f "$LAB"/system.qcow2 "$LAB"/disk*.raw
+fi
 
 # ── Disks ────────────────────────────────────────────────────────────────────
 
