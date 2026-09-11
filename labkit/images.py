@@ -184,3 +184,79 @@ def _verify_node(conn: NodeSSH, node: ident.Node, index: int) -> None:
         if not conn.ok(command):
             raise ImageError(f"node{index}: {message}")
     log.info("node%d: verified", index)
+
+
+def bake_profile(profile_dir: Path, base_variant: str = "base",
+                 out_variant: str | None = None, version: str = "9.2-1",
+                 force: bool = False, mem: int = 6144, cpus: int = 4) -> str:
+    """Bake a profile's expensive setup into a derived image.
+
+    Some backends need real work before they can be tested at all - a DKMS
+    module built against the running kernel, packages from a third-party
+    repository. That is minutes per run, and because every lab boots a
+    throwaway overlay, "per run" means every single time.
+
+    So a profile may split its setup in two: bake.sh once, into an image, for
+    anything belonging to the machine; setup.sh every lab, for anything
+    belonging to the disks, which are recreated each time.
+
+    Bakes chain. A second profile with expensive setup builds on the first
+    one's result rather than on the base, so a lab with two of them pays for
+    each once instead of on every run.
+    """
+    from .profiles import profile_name
+
+    name = profile_name(profile_dir)
+    out_variant = out_variant or name
+    base = state.image_path(version, base_variant)
+    target = state.image_path(version, out_variant)
+
+    if not (profile_dir / "bake.sh").exists():
+        log.info("profile '%s' has no bake.sh; nothing to pre-build", name)
+        return base_variant
+    if not base.exists():
+        raise ImageError(f"image missing: {base}")
+    if target.exists() and not force:
+        log.info("derived image already built: %s", target.name)
+        return out_variant
+
+    workdir = state.state_dir() / "build" / f"bake-{out_variant}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    scratch = workdir / "node.qcow2"
+    scratch.unlink(missing_ok=True)
+    _overlay(base, scratch)
+
+    port = 25589
+    conn = NodeSSH(port, state.ssh_key())
+    machine = _build_machine("bake", scratch, workdir, port,
+                             ident.Node(1).mgmt_ip, ident.Node(1).mgmt_net,
+                             ident.Node(1).mgmt_gw, ident.BASE_MGMT_MAC,
+                             ident.BASE_GUEST_MAC, mem, cpus)
+
+    log.info("baking profile '%s' onto %s", name, base_variant)
+    machine.start()
+    try:
+        if not conn.wait(timeout=600):
+            raise ImageError(f"bake node did not come up - see {machine.console}")
+
+        conn.run(f"rm -rf /root/lab-profile && mkdir -p /root/lab-profile")
+        conn.push_dir(profile_dir, "/root/lab-profile")
+        # </dev/null so the profile cannot consume anything it should not.
+        conn.run("rm -f /root/.lab-bake-ready; chmod +x /root/lab-profile/*.sh "
+                 "2>/dev/null || true", check=False)
+        conn.run("bash /root/lab-profile/bake.sh </dev/null "
+                 "&& touch /root/.lab-bake-ready", check=False, timeout=5400)
+        if not conn.ok("test -f /root/.lab-bake-ready"):
+            raise ImageError(f"profile '{name}' bake did not complete")
+
+        conn.run("fstrim -av", check=False)
+        conn.run("systemctl poweroff", check=False)
+        machine.wait_until_stopped()
+    finally:
+        machine.kill()
+
+    log.info("flattening into a standalone image")
+    _flatten(scratch, target)
+    scratch.unlink(missing_ok=True)
+    log.info("built %s (%.1fG)", target.name, target.stat().st_size / (1 << 30))
+    return out_variant
