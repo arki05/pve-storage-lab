@@ -9,6 +9,7 @@ import pytest
 
 from conftest import needs_lxc, needs_images
 from helpers.data_guard import DataGuard
+from helpers.metadata import MetadataFixture
 from helpers.payloads import PATTERNS
 from helpers.volumes import assert_relocated
 from helpers.wait import wait_for_task
@@ -64,6 +65,10 @@ class TestCTMove:
     def test_move_volume_off_and_back(self, create_ct, pve, node, storage, pattern):
         ct = create_ct(start=True)
         guard = DataGuard(ct.exec()).seed(pattern=pattern)
+        # Contents are not the whole story: a move that preserves every byte
+        # and loses ownership, hardlinks or xattrs is still broken.
+        meta = MetadataFixture(ct.exec()).create()
+        tree = guard.tree_fingerprint()
         ct.stop()
 
         wait_for_task(pve, pve.create(
@@ -80,5 +85,10 @@ class TestCTMove:
 
         ct.start()
         guard.guest = ct.exec()
+        meta.guest = ct.exec()
         guard.verify("after a move round trip")
         guard.verify_sparse("after a move round trip")
+        meta.verify("after a move round trip")
+        assert guard.tree_fingerprint() == tree, (
+            "the volume's file tree changed across the move - something "
+            "outside the seeded files was lost, resized or re-owned")

@@ -129,7 +129,7 @@ class TestBackupChains:
         vm = create_vm()
         original = _size_bytes(pve, node, vm.vmid)
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage="local",
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=vm.vmid, storage="local",
             mode="stop", compress="zstd", remove=0,
         ), timeout=1800)
 
@@ -160,7 +160,7 @@ class TestBackupChains:
             ">/dev/null 2>&1 & echo started")
         time.sleep(8)
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage="local",
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=vm.vmid, storage="local",
             mode="snapshot", compress="zstd", remove=0,
         ), timeout=1800)
         assert vm.status() == "running", "the backup stopped a running guest"

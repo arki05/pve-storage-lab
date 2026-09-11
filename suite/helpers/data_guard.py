@@ -63,6 +63,26 @@ class DataGuard:
                 f"written out as real blocks"
             )
 
+    def tree_fingerprint(self, path: str = "/", deep: bool = False) -> str:
+        """A digest of a whole tree.
+
+        Cheap by default: stat only, no file contents. A Debian rootfs is tens
+        of thousands of files, and hashing all of them after every operation
+        would add hours across a full matrix for very little signal. The
+        stat-only pass still catches files vanishing, changing size, or
+        changing ownership or mode - which is what a broken copy usually does.
+
+        `deep=True` hashes contents as well. Worth it once per pair in the
+        cross-storage tests, not after every operation.
+        """
+        if deep:
+            command = (f"cd {path} && find . -xdev -type f -print0 | sort -z | "
+                       f"xargs -0 md5sum 2>/dev/null | md5sum")
+        else:
+            command = (f"cd {path} && find . -xdev "
+                       f"-printf '%p|%y|%m|%U|%G|%s\n' | sort | md5sum")
+        return self.guest.run(command, timeout=900).split()[0]
+
     def verify_missing(self, context: str = "") -> None:
         """Assert the seeded files are gone - for rollback-to-before-seed."""
         suffix = f" ({context})" if context else ""

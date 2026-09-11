@@ -26,8 +26,16 @@ class PVEError(RuntimeError):
 class PVE:
     """Thin pvesh wrapper. Paths are API paths: '/nodes/pve-lab/qemu'."""
 
+    # pvesh waits for the task it starts, so this timeout bounds the whole
+    # operation, not just the request. 120s was enough for everything until a
+    # migration, which then failed as a client timeout reported against
+    # whatever the test checked next - the lock, usually, which had nothing to
+    # do with it.
+    DEFAULT_TIMEOUT = 600
+
     def _run(self, verb: str, path: str, params: dict | None = None,
-             timeout: int = 120):
+             timeout: int | None = None):
+        timeout = timeout or self.DEFAULT_TIMEOUT
         args = [verb, path, "--output-format", "json"]
         for key, value in (params or {}).items():
             if value is None:
@@ -50,10 +58,20 @@ class PVE:
             # Some endpoints print a bare UPID rather than JSON.
             return out
 
-    def get(self, path, **params):    return self._run("get", path, params)
-    def create(self, path, **params): return self._run("create", path, params)
-    def set(self, path, **params):    return self._run("set", path, params)
-    def delete(self, path, **params): return self._run("delete", path, params)
+    # `_timeout` is popped rather than passed to pvesh: an operation that
+    # legitimately takes an hour - a migration, a large backup - needs to say
+    # so, and everything else keeps the default.
+    def get(self, path, **params):
+        return self._run("get", path, params, params.pop("_timeout", None))
+
+    def create(self, path, **params):
+        return self._run("create", path, params, params.pop("_timeout", None))
+
+    def set(self, path, **params):
+        return self._run("set", path, params, params.pop("_timeout", None))
+
+    def delete(self, path, **params):
+        return self._run("delete", path, params, params.pop("_timeout", None))
 
     # ── Convenience ──────────────────────────────────────────────────────────
 

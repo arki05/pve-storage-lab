@@ -155,7 +155,7 @@ class TestBackupAcrossStorages:
         ct.stop()
 
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=ct.vmid, storage="local",
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=ct.vmid, storage="local",
             mode="stop", compress="zstd", remove=0,
         ), timeout=1800)
         dumps = [c for c in pve.storage_content("local", content="backup")

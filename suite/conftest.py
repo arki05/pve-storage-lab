@@ -72,6 +72,14 @@ needs_images = pytest.mark.skipif(
 needs_size_enforcement = pytest.mark.skipif(
     not cap("ENFORCES_VOLUME_SIZE"),
     reason="storage does not enforce volume sizes")
+# A RAM snapshot writes the guest's memory to a storage as one large
+# sequential volume - a different workload from anything else here, and a
+# different guarantee: rollback has to restore a *running process*, not just a
+# disk. `vmstatestorage` is what makes it a storage test: without it PVE picks
+# a storage of its own and the backend under test is never exercised.
+needs_vmstate = pytest.mark.skipif(
+    not cap("SUPPORTS_VMSTATE"),
+    reason="storage does not hold VM state volumes")
 needs_tpm = pytest.mark.skipif(
     not cap("SUPPORTS_TPM"), reason="storage does not support TPM state volumes")
 needs_guest_visible_size = pytest.mark.skipif(

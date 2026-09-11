@@ -31,7 +31,7 @@ class TestVMBackup:
         vm.shutdown()
 
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage=BACKUP_STORAGE,
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=vm.vmid, storage=BACKUP_STORAGE,
             mode="stop", compress="zstd", remove=0,
         ), timeout=1800)
         archive = _newest_backup(pve, vm.vmid)
@@ -59,7 +59,7 @@ class TestVMBackup:
         DataGuard(vm.agent()).seed()
 
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage=BACKUP_STORAGE,
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=vm.vmid, storage=BACKUP_STORAGE,
             mode="snapshot", compress="zstd", remove=0,
         ), timeout=1800)
 
@@ -79,7 +79,7 @@ class TestCTBackup:
         ct.stop()
 
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=ct.vmid, storage=BACKUP_STORAGE,
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=ct.vmid, storage=BACKUP_STORAGE,
             mode="stop", compress="zstd", remove=0,
         ), timeout=1800)
         archive = _newest_backup(pve, ct.vmid)
@@ -106,7 +106,7 @@ class TestCTBackup:
         DataGuard(ct.exec()).seed()
 
         wait_for_task(pve, pve.create(
-            f"/nodes/{node}/vzdump", vmid=ct.vmid, storage=BACKUP_STORAGE,
+            f"/nodes/{node}/vzdump", _timeout=1800, vmid=ct.vmid, storage=BACKUP_STORAGE,
             mode="snapshot", compress="zstd", remove=0,
         ), timeout=1800)
 

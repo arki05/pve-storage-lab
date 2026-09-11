@@ -64,3 +64,25 @@ class TestDaemonResilience:
         time.sleep(5)
         assert ct.status() == "running", "the container stopped when a daemon restarted"
         guard.verify("after a daemon restart")
+
+
+class TestFilesystemConsistency:
+    """Ask the backend whether it is still intact.
+
+    Everything else here checks data the tests themselves wrote. This catches
+    damage nothing happened to read back - which is the only way a silent
+    corruption gets noticed at all.
+
+    The command comes from the profile, because only it knows how to check its
+    own filesystem, and whether that can be done while mounted.
+    """
+
+    def test_the_filesystem_reports_itself_clean(self, config):
+        command = config.get("CONSISTENCY_CHECK")
+        if not command:
+            pytest.skip("profile declares no consistency check")
+        result = subprocess.run(["bash", "-c", command], capture_output=True,
+                                text=True, timeout=3600)
+        assert result.returncode == 0, (
+            f"the storage reports itself damaged after this run:\n"
+            f"$ {command}\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}")
