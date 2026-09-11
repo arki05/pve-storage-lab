@@ -1,78 +1,58 @@
 #!/usr/bin/env bash
-# Boot a lab node from the base image.
+# Boot a lab: one node, or a cluster of them.
 #
-# The node runs on a throwaway qcow2 overlay, so the base image is never
-# modified and "reset to pristine" is `down.sh --reset` - a delete and a
-# re-create, not a reinstall. Test disks are raw files attached with stable
-# serials, so a profile can address them as /dev/disk/by-id/virtio-labdiskN
-# regardless of enumeration order.
+# Each node boots from its own node image - the base image plus that node's
+# identity, built by lab/node-image.sh - so a node comes up correct rather than
+# being corrected afterwards. Node images are qcow2 overlays on the base, so a
+# node costs a few megabytes, and the lab itself boots a throwaway overlay on
+# top of that. Resetting a node is a delete, not a reinstall.
 #
-# The NIC's MAC is pinned and the image names the interface after it
-# (enx<mac>), so the name cannot move when test disks are added. Devices also
-# sit at fixed PCI slots - system disk 0x10, NIC 0x11, test disks 0x12 upward -
-# which keeps the system disk at vda and gives the MAC pinning a second line of
-# defence. The default naming scheme derives the name from PCI geography, so
-# without this, attaching a test disk renames the NIC, vmbr0 ends up bridging a
-# port that no longer exists, and the node boots to a login prompt that is
-# completely unreachable. bootindex=0 likewise stops SeaBIOS guessing.
+# Each node has three NICs, which is what a real PVE node has:
 #
-# Networking is user-mode with port forwards only: no bridge, no tap device,
-# and therefore no elevated privileges beyond /dev/kvm. That is what lets the
-# whole lab run inside an unprivileged container.
+#   management  its own user-mode network per node, reached only through the
+#               host's port forward. Nothing is shared between nodes.
+#   guest       vmbr0, with no host address. Guests live here and the node does
+#               not, so a guest can never take the node's address.
+#   cluster     a QEMU socket netdev - a raw L2 link between QEMU processes,
+#               entirely in userspace. No tap and no bridge, so /dev/kvm stays
+#               the only elevated thing the runner needs.
 #
-# With --nodes 2 the lab becomes a PVE cluster, which is what migration needs.
-# The second NIC each node gets is a QEMU socket netdev - a raw L2 link between
-# QEMU processes, entirely in userspace. No tap, no bridge, so no /dev/net/tun
-# and no NET_ADMIN: /dev/kvm stays the only elevated thing the runner has.
+# Test disks are raw files attached with stable serials, so a profile addresses
+# them as /dev/disk/by-id/virtio-labdiskN rather than guessing at vdb. The
+# system disk carries bootindex=0 so SeaBIOS does not have to guess either.
 #
-# Both nodes keep the same management MAC and address. Each node's user-mode
-# network is its own isolated segment, so there is nothing to collide - which
-# means the image needs no per-node variation for management at all. Only the
-# cluster NIC differs.
-#
-#   up.sh [--name lab] [--nodes 2] [--disks 4] [--disk-size 8G] [--mem 6144]
-#         [--cpus 4] [--reuse]
+#   up.sh [--name lab] [--nodes 2] [--disks 4] [--disk-size 8G]
+#         [--mem 6144] [--cpus 4] [--variant base] [--fresh] [--reuse]
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/nodes.sh"
 
+ROOT="$(lab_root)"
 NAME="${LAB_NAME:-lab}"
 NODES="${LAB_NODES:-1}"
 PVE_VERSION="${PVE_VERSION:-9.2-1}"
-# A profile with expensive setup bakes it into a derived image; boot that
-# instead of the base so the cost is paid once rather than every lab.
 IMAGE_VARIANT="${IMAGE_VARIANT:-base}"
 DISKS="${LAB_DISKS:-4}"
 DISK_SIZE="${LAB_DISK_SIZE:-8G}"
 MEM="${LAB_MEM:-6144}"
 CPUS="${LAB_CPUS:-4}"
-SSH_PORT="${LAB_SSH_PORT:-25522}"
-GUI_PORT="${LAB_GUI_PORT:-28006}"
-# Must match the MAC baked into the image: the node names its NIC after it.
-LAB_MAC="${LAB_MAC:-52:54:00:1a:b0:01}"
-# Must match the static address baked into the image. Guests get DHCP from
-# .20 upward so they can never take the address the forwards point at.
-LAB_NODE_IP="${LAB_NODE_IP:-10.0.2.10}"
-# The cluster link. Multicast rather than a point-to-point pair so the same
-# invocation works for any node count.
 CLUSTER_MCAST="${LAB_CLUSTER_MCAST:-230.0.0.1:24000}"
-CLUSTER_NET="${LAB_CLUSTER_NET:-10.9.9}"
 FRESH=0
 REUSE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --name)      NAME="$2";      shift 2 ;;
-        --nodes)     NODES="$2";     shift 2 ;;
-        --disks)     DISKS="$2";     shift 2 ;;
-        --disk-size) DISK_SIZE="$2"; shift 2 ;;
-        --mem)       MEM="$2";       shift 2 ;;
-        --cpus)      CPUS="$2";      shift 2 ;;
-        --ssh-port)  SSH_PORT="$2";  shift 2 ;;
-        --fresh)     FRESH=1;        shift ;;
-        --reuse)     REUSE=1;        shift ;;
+        --name)      NAME="$2";          shift 2 ;;
+        --nodes)     NODES="$2";         shift 2 ;;
+        --disks)     DISKS="$2";         shift 2 ;;
+        --disk-size) DISK_SIZE="$2";     shift 2 ;;
+        --mem)       MEM="$2";           shift 2 ;;
+        --cpus)      CPUS="$2";          shift 2 ;;
         --variant)   IMAGE_VARIANT="$2"; shift 2 ;;
-        -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
+        --fresh)     FRESH=1;            shift ;;
+        --reuse)     REUSE=1;            shift ;;
+        -h|--help)   sed -n '2,25p' "$0"; exit 0 ;;
         *)           die "unknown argument: $1" ;;
     esac
 done
@@ -80,50 +60,46 @@ done
 require_cmd qemu-system-x86_64 qemu-img ssh
 
 STATE="$(lab_state_dir)"
-IMAGE="$STATE/images/pve-${PVE_VERSION}-${IMAGE_VARIANT}.qcow2"
 SSH_KEY="$STATE/id_ed25519"
 LAB="$STATE/labs/$NAME"
 
-[[ -f "$IMAGE" ]] || die "base image missing: $IMAGE (run lab/build-image.sh first)"
+# ── Already running? ─────────────────────────────────────────────────────────
 
-running_nodes=0
+running=0
 for ((i = 1; i <= NODES; i++)); do
     pid="$LAB/node$i/qemu.pid"
-    [[ -f "$pid" ]] && kill -0 "$(cat "$pid")" 2>/dev/null && running_nodes=$((running_nodes + 1))
+    [[ -f "$pid" ]] && kill -0 "$(cat "$pid")" 2>/dev/null && running=$((running + 1))
 done
-
-if [[ $running_nodes -gt 0 ]]; then
+if [[ $running -gt 0 ]]; then
     if [[ $FRESH -eq 0 ]]; then
-        log_info "lab '$NAME' already running ($running_nodes node(s))"
+        log_info "lab '$NAME' already running ($running node(s))"
         cat "$LAB/lab.env"
         exit 0
     fi
     log_info "lab '$NAME' running; tearing it down first (--fresh)"
-    "$(lab_root)/lab/down.sh" --name "$NAME" --reset
+    "$ROOT/lab/down.sh" --name "$NAME" --reset
 fi
-
 [[ $FRESH -eq 1 ]] && rm -rf "$LAB"
 mkdir -p "$LAB"
 
 mapfile -t SSH_OPTS < <(node_ssh_opts)
 
+# ── Boot ─────────────────────────────────────────────────────────────────────
+
 for ((i = 1; i <= NODES; i++)); do
+    "$ROOT/lab/node-image.sh" --node "$i" --variant "$IMAGE_VARIANT" >&2
+
+    NODE_IMAGE="$STATE/images/pve-${PVE_VERSION}-${IMAGE_VARIANT}-node${i}.qcow2"
     ND="$LAB/node$i"
     mkdir -p "$ND"
 
-    # Starting a lab that is not currently running discards the previous one's
-    # overlay and disks unless --reuse is given. They are stale in two ways:
-    # they hold a previous run's filesystems, and they accumulate - test disks
-    # fill as tests write to them, so a handful of runs quietly consumed 21 GB
-    # of the runner before this existed. A lab is meant to be throwaway.
-    if [[ $REUSE -eq 0 ]]; then
-        rm -f "$ND"/system.qcow2 "$ND"/disk*.raw
-    fi
+    # A stopped lab's disks are discarded unless --reuse. They are stale twice
+    # over: they hold the previous run's filesystems, and they accumulate -
+    # test disks fill as tests write to them.
+    [[ $REUSE -eq 0 ]] && rm -f "$ND"/system.qcow2 "$ND"/disk*.raw
 
-    if [[ ! -f "$ND/system.qcow2" ]]; then
-        log_info "node$i: creating overlay on $(basename "$IMAGE")"
-        qemu-img create -f qcow2 -b "$IMAGE" -F qcow2 "$ND/system.qcow2" >/dev/null
-    fi
+    [[ -f "$ND/system.qcow2" ]] || \
+        qemu-img create -f qcow2 -b "$NODE_IMAGE" -F qcow2 "$ND/system.qcow2" >/dev/null
 
     disk_args=()
     for d in $(seq 1 "$DISKS"); do
@@ -131,33 +107,26 @@ for ((i = 1; i <= NODES; i++)); do
         [[ -f "$f" ]] || qemu-img create -f raw "$f" "$DISK_SIZE" >/dev/null
         disk_args+=(
             -drive "file=$f,if=none,id=d$d,format=raw,cache=unsafe"
-            -device "virtio-blk-pci,drive=d$d,serial=labdisk$d,addr=$(printf '0x%x' $((0x12 + d)))"
+            -device "virtio-blk-pci,drive=d$d,serial=labdisk$d,addr=$(printf '0x%x' $((0x13 + d)))"
         )
     done
 
-    # A second NIC only when there is a cluster to form. Its slot is fixed at
-    # 0x12 and the test disks start at 0x13 either way, so the device layout
-    # does not change between one node and several.
-    cluster_args=()
-    if [[ $NODES -gt 1 ]]; then
-        cluster_args=(
-            -netdev "socket,id=clus,mcast=$CLUSTER_MCAST"
-            -device "virtio-net-pci,netdev=clus,addr=0x12,mac=52:54:00:1a:c1:0$i"
-        )
-    fi
+    ssh_port="$(node_ssh_port "$i")"
+    gui_port="$(node_gui_port "$i")"
+    mgmt_ip="$(node_mgmt_ip "$i")"
 
-    ssh_port=$((SSH_PORT + (i - 1) * 10))
-    gui_port=$((GUI_PORT + (i - 1) * 10))
-
-    log_info "node$i: booting ($CPUS cpus, ${MEM}M, $DISKS x $DISK_SIZE test disks)"
+    log_info "node$i ($(node_hostname "$i")): booting - $CPUS cpus, ${MEM}M, $DISKS x $DISK_SIZE, mgmt $mgmt_ip"
     qemu-system-x86_64 \
         -enable-kvm -cpu host -machine q35 \
         -smp "$CPUS" -m "$MEM" \
         -drive file="$ND/system.qcow2",if=none,id=sys,format=qcow2 \
         -device virtio-blk-pci,drive=sys,serial=labsystem,addr=0x10,bootindex=0 \
-        -netdev user,id=n0,net=10.0.2.0/24,host=10.0.2.2,dhcpstart=10.0.2.20,hostfwd=tcp:127.0.0.1:"$ssh_port"-"$LAB_NODE_IP":22,hostfwd=tcp:127.0.0.1:"$gui_port"-"$LAB_NODE_IP":8006 \
-        -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
-        "${cluster_args[@]}" \
+        -netdev user,id=mgmt,net="$(node_mgmt_net "$i")",host="$(node_mgmt_gw "$i")",hostfwd=tcp:127.0.0.1:"$ssh_port"-"$mgmt_ip":22,hostfwd=tcp:127.0.0.1:"$gui_port"-"$mgmt_ip":8006 \
+        -device virtio-net-pci,netdev=mgmt,addr=0x11,mac="$(node_mgmt_mac "$i")" \
+        -netdev user,id=guest,net="$(node_guest_net "$i")",host="$(node_guest_gw "$i")" \
+        -device virtio-net-pci,netdev=guest,addr=0x12,mac="$(node_guest_mac "$i")" \
+        -netdev socket,id=clus,mcast="$CLUSTER_MCAST" \
+        -device virtio-net-pci,netdev=clus,addr=0x13,mac="$(node_cluster_mac "$i")" \
         "${disk_args[@]}" \
         -display none -serial file:"$ND/console.log" \
         -pidfile "$ND/qemu.pid" -daemonize
@@ -173,30 +142,32 @@ for ((i = 1; i <= NODES; i++)); do
     [[ $up -eq 1 ]] || die "node$i did not come up - see $ND/console.log"
 done
 
+# ── Record ───────────────────────────────────────────────────────────────────
+
 {
     echo "LAB_NAME=$NAME"
     echo "LAB_DIR=$LAB"
     echo "LAB_NODE_COUNT=$NODES"
-    # NODE_SSH_PORT is node 1, so everything written for a single-node lab
-    # keeps working unchanged.
-    echo "NODE_SSH_PORT=$SSH_PORT"
-    echo "NODE_GUI_PORT=$GUI_PORT"
+    # NODE_SSH_PORT is node 1, so anything written for a single-node lab keeps
+    # working unchanged.
+    echo "NODE_SSH_PORT=$(node_ssh_port 1)"
+    echo "NODE_GUI_PORT=$(node_gui_port 1)"
     echo "NODE_SSH_KEY=$SSH_KEY"
     for ((i = 1; i <= NODES; i++)); do
-        echo "NODE${i}_SSH_PORT=$((SSH_PORT + (i - 1) * 10))"
-        echo "NODE${i}_GUI_PORT=$((GUI_PORT + (i - 1) * 10))"
-        echo "NODE${i}_CLUSTER_IP=${CLUSTER_NET}.$i"
+        echo "NODE${i}_NAME=$(node_hostname "$i")"
+        echo "NODE${i}_SSH_PORT=$(node_ssh_port "$i")"
+        echo "NODE${i}_GUI_PORT=$(node_gui_port "$i")"
+        echo "NODE${i}_MGMT_IP=$(node_mgmt_ip "$i")"
+        echo "NODE${i}_CLUSTER_IP=$(node_cluster_ip "$i")"
     done
     echo "LAB_DISKS=$DISKS"
     echo "LAB_DISK_SIZE=$DISK_SIZE"
-    echo "LAB_CLUSTER_NET=$CLUSTER_NET"
     echo "PVE_VERSION=$PVE_VERSION"
     echo "IMAGE_VARIANT=$IMAGE_VARIANT"
 } > "$LAB/lab.env"
 
 if [[ $NODES -gt 1 ]]; then
-    log_info "forming a cluster across $NODES nodes"
-    "$(lab_root)/lab/cluster.sh" --name "$NAME"
+    "$ROOT/lab/cluster.sh" --name "$NAME"
 fi
 
 log_info "lab '$NAME' is up"

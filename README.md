@@ -70,25 +70,48 @@ bash run.sh --profile-dir ./profiles/zfs --nodes 2
 ```
 
 Migration is the only reason this exists — PVE cannot move a guest between
-unclustered nodes — and it stays opt-in so single-node runs are unchanged.
+unclustered nodes — and it is opt-in, so single-node runs are unchanged.
 
-The nodes talk over a **QEMU socket netdev**: a raw L2 link between QEMU
-processes, entirely in userspace. No tap, no bridge, so still no
-`/dev/net/tun` and no `NET_ADMIN` — `/dev/kvm` remains the only elevated thing
-the runner has.
+Each node boots from its **own node image**: the base image plus that node's
+identity, built by `lab/node-image.sh` as a qcow2 overlay costing ~15 MB. A
+node comes up correct rather than being corrected afterwards, and the PVE
+rename happens once, on a standalone node, instead of during cluster
+formation.
 
-Both nodes keep the **same management MAC and address**. Each node's user-mode
-network is its own isolated segment, so there is nothing to collide, and the
-image needs no per-node variation. Only the cluster NIC differs.
+Everything about a node is derived from its index (`lib/nodes.sh`):
 
-That trick has one sharp edge worth knowing if you extend this: because every
-node answers on `10.0.2.10`, a peer that resolves a node name to its management
-address reaches **itself**. PVE keeps a node's address in `/etc/pve/.members`
-from exactly that lookup and uses it to ssh between nodes, so leaving the
-installer's `/etc/hosts` line in place makes a node migrate a guest to itself,
-deadlock on a lock it already holds, and leave the guest locked. `cluster.sh`
-strips those entries and then asserts each node resolves its own name to the
-cluster address before going any further.
+| node | hostname | management | guest bridge | cluster |
+|---|---|---|---|---|
+| 1 | `pve-node1` | `10.0.2.10` | vmbr0, no address | `10.9.9.1` |
+| 2 | `pve-node2` | `10.0.3.10` | vmbr0, no address | `10.9.9.2` |
+
+Three NICs, which is what a real node has, and the separation is load-bearing:
+
+- **management** is on its own network per node, reached only through the
+  host's port forward. Nothing is shared between nodes.
+- **the guest bridge carries no host address.** The node does not live on the
+  segment its guests do, so a guest can never take the node's address or its
+  DHCP lease — a bug this lab had when the two shared `vmbr0`.
+- **cluster** is a QEMU socket netdev: a raw L2 link between QEMU processes, in
+  userspace. No tap and no bridge, so `/dev/kvm` stays the only elevated thing
+  the runner needs.
+
+Four things about PVE that this had to learn the hard way, all asserted now
+rather than discovered later:
+
+- `/etc/pve` is pmxcfs, where a VMID is globally unique. Guest configs
+  **move** between node directories; `cp` fails with "File exists" and `cp -a`
+  fails outright. Losing them quietly means the baked VM template vanishes and
+  every VM test silently skips.
+- **A joining node must have no guests.** `pvecm add` refuses otherwise, so
+  only node 1 keeps the baked VM template — the cluster's guests are node 1's.
+- Every node image starts from the same base, so each must regenerate its
+  **SSH host keys**, and the cluster must then run `pvecm updatecerts`. Without
+  it, PVE's inherited `ssh_known_hosts` names the right node with the wrong
+  key and any proxied API call fails — appearing as migrations timing out, not
+  as an SSH error.
+- A **UPID encodes the node it ran on**. Asking any other node for a task's
+  status is a 500.
 
 ## Testing several storages at once
 

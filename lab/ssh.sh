@@ -2,6 +2,7 @@
 # SSH into a lab node.  ssh.sh [--name lab] [--node N] [command...]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/nodes.sh"
 
 NAME="${LAB_NAME:-lab}"
 NODE=1
@@ -18,9 +19,7 @@ LAB="$(lab_state_dir)/labs/$NAME"
 # shellcheck disable=SC1091
 source "$LAB/lab.env"
 
-port_var="NODE${NODE}_SSH_PORT"
-port="${!port_var:-$NODE_SSH_PORT}"
-[[ -n "$port" ]] || die "no node $NODE in lab '$NAME'"
+port="$(node_ssh_port "$NODE")"
 
 mapfile -t SSH_OPTS < <(node_ssh_opts)
 exec ssh "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$port" root@127.0.0.1 "$@"

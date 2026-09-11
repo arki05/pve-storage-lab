@@ -20,8 +20,21 @@ BUILD_MEM="${BUILD_MEM:-4096}"
 BUILD_CPUS="${BUILD_CPUS:-4}"
 SSH_PORT="${SSH_PORT:-25522}"
 # Pinned so the interface name can be derived from it (see LAB_IFNAME).
+# Three roles, three NICs, each with a pinned MAC so the interface name is
+# derived from it rather than from a PCI slot.
+#
+#   mgmt     what the host forwards to, and the node's own address
+#   guest    the bridge guests attach to - vmbr0, with no host address
+#   cluster  added later by cluster.sh, only when there is a cluster
+#
+# Keeping the node's address off the guest bridge is the point. When they share
+# a segment a guest can take the node's DHCP lease, and two nodes cannot have
+# distinct addresses without re-addressing them after boot. Separating them
+# makes both problems impossible rather than guarded against.
 LAB_MAC="52:54:00:1a:b0:01"
 LAB_IFNAME="enx5254001ab001"
+LAB_GUEST_MAC="52:54:00:1a:b1:01"
+LAB_GUEST_IFNAME="enx5254001ab101"
 # The node takes a fixed address below SLIRP's DHCP range, and guests are
 # pushed above it. SLIRP hands out 10.0.2.15 first and hostfwd targets that
 # address by default - so the moment a test guest bridged onto vmbr0 it took
@@ -32,6 +45,14 @@ LAB_NET="10.0.2.0/24"
 LAB_GW="10.0.2.2"
 LAB_DNS="10.0.2.3"
 LAB_DHCP_START="10.0.2.20"
+# The guest bridge lives on its own network on every node. Nothing routes
+# between nodes here - the cluster link does that - so the same numbers on
+# each node are correct rather than merely convenient.
+LAB_GUEST_NET="10.0.99.0/24"
+LAB_GUEST_GW="10.0.99.2"
+LAB_GUEST_DHCP="10.0.99.20"
+# Only the base image holds this; node images do not.
+LAB_GUEST_HOST_IP="10.0.99.1"
 # Baked into the image; the suite clones from it rather than building its own.
 GUEST_TEMPLATE_VMID="${GUEST_TEMPLATE_VMID:-900}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-pvelab123}"
@@ -138,6 +159,7 @@ timeout 3600 qemu-system-x86_64 \
     -device virtio-blk-pci,drive=sys,addr=0x10,bootindex=0 \
     -cdrom "$WORK/auto.iso" -boot d \
     -netdev user,id=n0,net="$LAB_NET",host="$LAB_GW",dhcpstart="$LAB_NODE_IP" -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
+    -netdev user,id=n1,net="$LAB_GUEST_NET",host="$LAB_GUEST_GW" -device virtio-net-pci,netdev=n1,addr=0x12,mac="$LAB_GUEST_MAC" \
     "${qemu_display[@]}" \
     -serial file:"$WORK/install.log" \
     -no-reboot \
@@ -153,8 +175,10 @@ qemu-system-x86_64 \
     -smp "$BUILD_CPUS" -m "$BUILD_MEM" \
     -drive file="$WORK/node.qcow2",if=none,id=sys,format=qcow2,cache=unsafe \
     -device virtio-blk-pci,drive=sys,addr=0x10,bootindex=0 \
-    -netdev user,id=n0,net="$LAB_NET",host="$LAB_GW",dhcpstart="$LAB_DHCP_START",hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$LAB_NODE_IP":22 \
+    -netdev user,id=n0,net="$LAB_NET",host="$LAB_GW",dhcpstart="$LAB_NODE_IP",hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$LAB_NODE_IP":22 \
     -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
+    -netdev user,id=n1,net="$LAB_GUEST_NET",host="$LAB_GUEST_GW" \
+    -device virtio-net-pci,netdev=n1,addr=0x12,mac="$LAB_GUEST_MAC" \
     -display none -serial file:"$WORK/firstboot.log" \
     -pidfile "$WORK/qemu.pid" -daemonize
 
@@ -181,9 +205,9 @@ done
 node_ssh true 2>/dev/null || die "node never came up - see $WORK/firstboot.log"
 log_info "node is up"
 
-node_ssh_stdin "bash -s $LAB_IFNAME $LAB_MAC $LAB_NODE_IP $LAB_GW $LAB_DNS" <<'REMOTE'
+node_ssh_stdin "bash -s $LAB_IFNAME $LAB_MAC $LAB_NODE_IP $LAB_GW $LAB_DNS $LAB_GUEST_IFNAME $LAB_GUEST_HOST_IP" <<'REMOTE'
 set -e
-IFNAME="$1"; MAC="$2"; NODE_IP="$3"; GW="$4"; DNS="$5"
+IFNAME="$1"; MAC="$2"; NODE_IP="$3"; GW="$4"; DNS="$5"; GUEST_IFNAME="$6"; GUEST_HOST_IP="$7"
 [ -n "$IFNAME" ] && [ -n "$MAC" ] && [ -n "$NODE_IP" ] || { echo "args not passed through" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
@@ -229,13 +253,51 @@ sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="quiet conso
 grep -q GRUB_TERMINAL /etc/default/grub || printf 'GRUB_TERMINAL="console serial"\nGRUB_SERIAL_COMMAND="serial --speed=115200"\n' >> /etc/default/grub
 update-grub
 
-# The installer already wrote a static address from the answer file; just make
-# sure it is the one the host forwards to, so a mismatch fails here rather than
-# as an unreachable node later.
+# The installer puts the management NIC into vmbr0 and the node's address on
+# the bridge, which entangles the node with its guests: a guest can take the
+# node's DHCP lease, and two nodes cannot hold distinct addresses without being
+# re-addressed after boot. Split the roles instead.
+#
+# Management goes back to DHCP, which is safe here precisely because it is now
+# alone on its segment - the only client, so the lease is whatever the lab
+# hands out first, deterministically. vmbr0 moves to its own NIC and carries no
+# host address at all.
 grep -q "$NODE_IP" /etc/network/interfaces || {
     echo "installer did not configure $NODE_IP" >&2
     exit 1
 }
+
+cat > /etc/network/interfaces <<EOF
+auto lo
+iface lo inet loopback
+
+# Management. Alone on its own user-mode network, so DHCP is deterministic and
+# no guest can ever take this address. A node image replaces this with a static
+# address and its own MAC-derived name.
+auto $IFNAME
+iface $IFNAME inet dhcp
+
+# The bridge guests attach to. No address: the node does not live here, which
+# is what keeps a guest from ever taking the node's lease.
+auto $GUEST_IFNAME
+iface $GUEST_IFNAME inet manual
+
+# An address here, unlike on a node. The base image is never booted as a lab
+# node - it exists to build node images from, and building one means talking to
+# the guest it boots to bake the VM template. A node image drops this, which is
+# what keeps a node off the guest segment.
+auto vmbr0
+iface vmbr0 inet static
+        address $GUEST_HOST_IP/24
+        bridge-ports $GUEST_IFNAME
+        bridge-stp off
+        bridge-fd 0
+
+source /etc/network/interfaces.d/*
+EOF
+# Deliberately not applied here. This rewrites the very interface the SSH
+# session is riding on - bringing it up live drops the connection mid-script.
+# The reboot below applies it, and verifies it.
 
 # Name the NIC after its (pinned) MAC instead of its PCI slot. The default
 # NamePolicy ends in `path`, which encodes PCI bus/slot geography - so simply
@@ -255,12 +317,38 @@ NamePolicy=mac
 EOF
 # The rename happens in early userspace, so the rule has to be in the initramfs.
 update-initramfs -u
-sed -i "s|^\(\s*bridge-ports\).*|\1 $IFNAME|" /etc/network/interfaces
-sed -i "s|^iface \(enp\|ens\|eno\|eth\)[^ ]* inet manual|iface $IFNAME inet manual|" /etc/network/interfaces
 
 # Zero the free space so the qcow2 compacts well - the image gets shipped.
 fstrim -av || true
 REMOTE
+
+# Reboot before baking anything. The templates are baked *through* this
+# network - the node talks to the guest it boots over vmbr0 - so the network
+# has to be the final one first. It also means a broken network fails here,
+# rather than as a mysterious timeout during the bake.
+log_info "rebooting onto the final network"
+node_ssh 'systemctl reboot' 2>/dev/null || true
+sleep 20
+up=0
+for _ in $(seq 1 60); do
+    node_ssh true 2>/dev/null && { up=1; break; }
+    sleep 5
+done
+[[ $up -eq 1 ]] || die "node unreachable after the interface rename - see $WORK/firstboot.log"
+
+node_ssh "ip -br link show $LAB_IFNAME" >/dev/null 2>&1 \
+    || die "management interface $LAB_IFNAME did not appear after reboot"
+node_ssh "ip -br link show $LAB_GUEST_IFNAME" >/dev/null 2>&1 \
+    || die "guest interface $LAB_GUEST_IFNAME did not appear after reboot"
+node_ssh "ip -4 -o addr show $LAB_IFNAME | grep -q inet" \
+    || die "$LAB_IFNAME has no address after reboot"
+# vmbr0 must be up and must NOT carry an address: the node lives on the
+# management NIC, and anything here would put it back on the guest segment.
+node_ssh "ip -br link show vmbr0 | grep -q UP" || die "vmbr0 is not up"
+node_ssh "ip -4 -o addr show vmbr0 | grep -q $LAB_GUEST_HOST_IP" \
+    || die "vmbr0 does not carry $LAB_GUEST_HOST_IP; the bake guest would be unreachable"
+log_info "verified: management on $LAB_IFNAME, vmbr0 bridging $LAB_GUEST_IFNAME"
+
 
 # ── Bake in the guest templates ──────────────────────────────────────────────
 #
@@ -291,7 +379,7 @@ log_info "baking in the VM template (downloads a cloud image and boots it once)"
 node_ssh_stdin "bash -s $GUEST_TEMPLATE_VMID" <<'REMOTE'
 set -e
 VMID="$1"
-BAKE_IP=10.0.2.11          # static, below the guest DHCP range, above the node
+BAKE_IP=10.0.99.11         # on the guest network, below its DHCP range
 IMG=/var/lib/vz/template/debian-13-genericcloud-amd64.qcow2
 [ -f "$IMG" ] || curl -fsSL -o "$IMG" \
     https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
@@ -313,7 +401,7 @@ qm set "$VMID" --ide2 local-lvm:cloudinit
 # timing out waiting for an agent that was never installed.
 qm set "$VMID" --ciuser root --cipassword pvelab \
     --sshkeys /root/.ssh/id_ed25519.pub \
-    --ipconfig0 "ip=${BAKE_IP}/24,gw=10.0.2.2" --nameserver 10.0.2.3 \
+    --ipconfig0 "ip=${BAKE_IP}/24,gw=10.0.99.2" --nameserver 10.0.99.3 \
     --boot order=scsi0
 qm start "$VMID"
 
@@ -377,23 +465,6 @@ echo "VM template ready"
 REMOTE
 node_ssh "test -f /root/.lab-vm-template-ready" \
     || die "VM template bake did not complete"
-
-# The rename only takes effect on the next boot, so verify it here rather than
-# discovering it in every lab that uses the image.
-log_info "rebooting to verify the interface rename"
-node_ssh 'systemctl reboot' 2>/dev/null || true
-sleep 20
-up=0
-for _ in $(seq 1 60); do
-    node_ssh true 2>/dev/null && { up=1; break; }
-    sleep 5
-done
-[[ $up -eq 1 ]] || die "node unreachable after the interface rename - see $WORK/firstboot.log"
-
-got=$(node_ssh "ip -br link show $LAB_IFNAME >/dev/null 2>&1 && echo ok || echo missing")
-[[ "$got" == "ok" ]] || die "interface $LAB_IFNAME did not appear after reboot"
-node_ssh "ip -br a show vmbr0 | grep -q 'UP'" || die "vmbr0 is not up after the rename"
-log_info "verified: $LAB_IFNAME present, vmbr0 up"
 
 log_info "shutting down"
 node_ssh 'systemctl poweroff' 2>/dev/null || true
