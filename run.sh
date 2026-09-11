@@ -330,7 +330,10 @@ if [[ $run_suites -eq 1 ]]; then
         if [[ -n "${P_TESTS[$i]}" ]]; then
             node_ssh "cp -r /root/lab-tests-$pname/. /root/lab-suite/tests/"
         fi
-        run_suite "$pname" "/root/lab-test-$pname.env" "tests"
+        # Cross-storage tests belong to the pairwise pass, not to any one
+        # storage's run - they would otherwise be collected once per profile
+        # and move the same volumes several times over.
+        run_suite "$pname" "/root/lab-test-$pname.env" "-m 'not crossstorage' tests"
     done
 
     if [[ $CROSS -eq 1 ]] && [[ -z "$ONLY" || "$ONLY" == cross ]]; then

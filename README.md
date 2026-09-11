@@ -180,6 +180,41 @@ profile can build and install the thing under test rather than pulling its last
 release. Without it the lab tests whatever was published — which is precisely
 the code you are not trying to find bugs in.
 
+## Cross-storage
+
+```bash
+bash run.sh --profile-dir ./profiles/zfs \
+            --profile-dir ./profiles/btrfs \
+            --profile-dir ./profiles/lvm-thin --cross
+```
+
+Proving a backend works on its own says nothing about what happens when data
+crosses between two of them — and that is where the interesting failures are.
+One backend's assumptions about layout, extended attributes, sparseness or
+size only get tested when something else has to read or reproduce them.
+
+Pairs are **ordered**, and direction is not a duplicate:
+
+| pair | round trip |
+|---|---|
+| `(zfs, btrfs)` | `zfs > btrfs > zfs` |
+| `(btrfs, zfs)` | `btrfs > zfs > btrfs` |
+
+Each backend writes a volume in one and reads a foreign one in the other, and
+a backend that reads correctly may still write its own wrongly. Deduplication
+is only `a != b`, so N storages give N×(N−1) round trips, each appearing
+exactly once. Container round trips run against all three payload shapes,
+so the count is N×(N−1)×5.
+
+The central assertion is **not** "the move succeeds". Some pairs legitimately
+cannot round-trip — a volume on a compressing backend can hold more logical
+data than its nominal size, and that will not fit on one that does not
+compress. What must always hold is that a move either succeeds completely or
+**fails cleanly**: the source still points at itself, its volume is still
+there, nothing is left stranded on the destination, and the guest still boots
+with its data. A move that reports success and delivers a truncated filesystem
+is the real hazard, and that is what these tests are looking for.
+
 ## Phases
 
 A whole run is one command, but each phase can be invoked on its own. CI wants

@@ -37,6 +37,16 @@ def _load_config() -> dict[str, str]:
 CONFIG = _load_config()
 
 
+def pytest_configure(config):
+    # The parameter has to be called `config`: pluggy matches hook arguments by
+    # name, and anything else fails validation at collection time.
+    config.addinivalue_line(
+        "markers",
+        "crossstorage: moves volumes between two storages; needs several "
+        "profiles and is selected with -m crossstorage",
+    )
+
+
 def cap(name: str) -> bool:
     return CONFIG.get(name, "false").strip().lower() in ("1", "true", "yes")
 
@@ -104,6 +114,46 @@ def node2(pve) -> str:
     if other is None:
         pytest.skip("migration needs a second node; this lab has one")
     return other
+
+
+def _storage_list() -> list[str]:
+    """Every storage registered in this lab, in the order the profiles ran.
+
+    Written by run.sh rather than discovered from PVE: the lab knows which
+    storages it registered, and `pvesm status` would also return the built-in
+    ones that no profile owns.
+    """
+    path = Path("/root/lab-storages.env")
+    if not path.exists():
+        return []
+    for line in path.read_text().splitlines():
+        if line.startswith("STORAGES="):
+            return [s for s in line.partition("=")[2].strip().split(",") if s]
+    return []
+
+
+@pytest.fixture(scope="session")
+def storages() -> list[str]:
+    found = _storage_list()
+    if len(found) < 2:
+        pytest.skip("cross-storage tests need at least two storages")
+    return found
+
+
+def storage_pairs() -> list[tuple[str, str]]:
+    """Ordered pairs, deduplicated only by a != b.
+
+    Direction is not a duplicate. A round trip starting on zfs
+    (zfs -> btrfs -> zfs) and one starting on btrfs (btrfs -> zfs -> btrfs)
+    exercise different code on both ends: each backend writes a volume in one
+    and reads a foreign one in the other, and a backend that reads correctly
+    may still write its own wrongly.
+
+    So both orders are kept, and nothing beyond that is generated: N storages
+    give N*(N-1) round trips, each appearing exactly once.
+    """
+    found = _storage_list()
+    return [(a, b) for a in found for b in found if a != b]
 
 
 @pytest.fixture(scope="session")
@@ -237,11 +287,14 @@ def create_vm(pve, node, storage, vm_template):
     created: list[LabVM] = []
 
     def _create(name: str = "lab-vm", memory: int = 1024, cores: int = 2,
-                full: bool = True) -> LabVM:
+                full: bool = True, on: str | None = None) -> LabVM:
+        # `on` selects a storage other than the one under test, which is what
+        # the cross-storage tests need.
+        target = on or storage
         vmid = pve.nextid()
         wait_for_task(pve, pve.create(
             f"/nodes/{node}/qemu/{vm_template}/clone",
-            newid=vmid, name=f"{name}-{vmid}", full=full, storage=storage,
+            newid=vmid, name=f"{name}-{vmid}", full=full, storage=target,
         ), timeout=600)
         pve.set(f"/nodes/{node}/qemu/{vmid}/config", memory=memory, cores=cores)
         vm = LabVM(pve, node, vmid)
@@ -258,12 +311,13 @@ def create_ct(pve, node, storage, ct_template):
     created: list[LabCT] = []
 
     def _create(name: str = "lab-ct", memory: int = 512, disk_gb: int = 2,
-                start: bool = False, **extra) -> LabCT:
+                start: bool = False, on: str | None = None, **extra) -> LabCT:
+        target = on or storage
         vmid = pve.nextid()
         wait_for_task(pve, pve.create(
             f"/nodes/{node}/lxc",
             vmid=vmid, hostname=f"{name}-{vmid}", ostemplate=ct_template,
-            storage=storage, rootfs=f"{storage}:{disk_gb}", memory=memory,
+            storage=target, rootfs=f"{target}:{disk_gb}", memory=memory,
             cores=1, net0="name=eth0,bridge=vmbr0,ip=dhcp", password="pvelab",
             unprivileged=1, start=0, **extra,
         ), timeout=600)
