@@ -27,6 +27,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 NAME="${LAB_NAME:-lab}"
 PVE_VERSION="${PVE_VERSION:-9.2-1}"
+# A profile with expensive setup bakes it into a derived image; boot that
+# instead of the base so the cost is paid once rather than every lab.
+IMAGE_VARIANT="${IMAGE_VARIANT:-base}"
 DISKS="${LAB_DISKS:-4}"
 DISK_SIZE="${LAB_DISK_SIZE:-8G}"
 MEM="${LAB_MEM:-6144}"
@@ -35,6 +38,9 @@ SSH_PORT="${LAB_SSH_PORT:-25522}"
 GUI_PORT="${LAB_GUI_PORT:-28006}"
 # Must match the MAC baked into the image: the node names its NIC after it.
 LAB_MAC="${LAB_MAC:-52:54:00:1a:b0:01}"
+# Must match the static address baked into the image. Guests get DHCP from
+# .20 upward so they can never take the address the forwards point at.
+LAB_NODE_IP="${LAB_NODE_IP:-10.0.2.10}"
 FRESH=0
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --cpus)      CPUS="$2";      shift 2 ;;
         --ssh-port)  SSH_PORT="$2";  shift 2 ;;
         --fresh)     FRESH=1;        shift ;;
+        --variant)   IMAGE_VARIANT="$2"; shift 2 ;;
         -h|--help)   sed -n '2,17p' "$0"; exit 0 ;;
         *)           die "unknown argument: $1" ;;
     esac
@@ -54,7 +61,7 @@ done
 require_cmd qemu-system-x86_64 qemu-img ssh
 
 STATE="$(lab_state_dir)"
-IMAGE="$STATE/images/pve-${PVE_VERSION}-base.qcow2"
+IMAGE="$STATE/images/pve-${PVE_VERSION}-${IMAGE_VARIANT}.qcow2"
 SSH_KEY="$STATE/id_ed25519"
 LAB="$STATE/labs/$NAME"
 
@@ -99,7 +106,7 @@ qemu-system-x86_64 \
     -drive file="$LAB/system.qcow2",if=none,id=sys,format=qcow2 \
     -device virtio-blk-pci,drive=sys,serial=labsystem,addr=0x10,bootindex=0 \
     "${disk_args[@]}" \
-    -netdev user,id=n0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22,hostfwd=tcp:127.0.0.1:"$GUI_PORT"-:8006 \
+    -netdev user,id=n0,net=10.0.2.0/24,host=10.0.2.2,dhcpstart=10.0.2.20,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$LAB_NODE_IP":22,hostfwd=tcp:127.0.0.1:"$GUI_PORT"-"$LAB_NODE_IP":8006 \
     -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
     -display none -serial file:"$LAB/console.log" \
     -pidfile "$LAB/qemu.pid" -daemonize
@@ -124,6 +131,7 @@ NODE_SSH_KEY=$SSH_KEY
 LAB_DISKS=$DISKS
 LAB_DISK_SIZE=$DISK_SIZE
 PVE_VERSION=$PVE_VERSION
+IMAGE_VARIANT=$IMAGE_VARIANT
 EOF
 
 log_info "lab '$NAME' is up"

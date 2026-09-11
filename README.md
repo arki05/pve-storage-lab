@@ -90,8 +90,14 @@ never grows backend-specific knowledge:
 
 ```bash
 bash run.sh --profile-dir ../pve-bcachefs/test/profile \
-            --extra-tests ../pve-bcachefs/test/tests
+            --extra-tests ../pve-bcachefs/test/tests \
+            --source-dir  ../pve-bcachefs
 ```
+
+`--source-dir` ships the working tree to the node as `/root/lab-source`, so a
+profile can build and install the thing under test rather than pulling its last
+release. Without it the lab tests whatever was published — which is precisely
+the code you are not trying to find bugs in.
 
 ## The suite
 

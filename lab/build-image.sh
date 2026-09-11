@@ -22,6 +22,16 @@ SSH_PORT="${SSH_PORT:-25522}"
 # Pinned so the interface name can be derived from it (see LAB_IFNAME).
 LAB_MAC="52:54:00:1a:b0:01"
 LAB_IFNAME="enx5254001ab001"
+# The node takes a fixed address below SLIRP's DHCP range, and guests are
+# pushed above it. SLIRP hands out 10.0.2.15 first and hostfwd targets that
+# address by default - so the moment a test guest bridged onto vmbr0 it took
+# the lease, the node came back on .16 after a reboot, and every port forward
+# pointed at an address nobody held.
+LAB_NODE_IP="10.0.2.10"
+LAB_NET="10.0.2.0/24"
+LAB_GW="10.0.2.2"
+LAB_DNS="10.0.2.3"
+LAB_DHCP_START="10.0.2.20"
 # Baked into the image; the suite clones from it rather than building its own.
 GUEST_TEMPLATE_VMID="${GUEST_TEMPLATE_VMID:-900}"
 ROOT_PASSWORD="${ROOT_PASSWORD:-pvelab123}"
@@ -89,6 +99,10 @@ log_info "rendering answer file"
 sed -e "s|@FQDN@|pve-lab.local|" \
     -e "s|@ROOT_PASSWORD@|${ROOT_PASSWORD}|" \
     -e "s|@ROOT_SSH_KEY@|$(cat "${SSH_KEY}.pub")|" \
+    -e "s|@NODE_CIDR@|${LAB_NODE_IP}/24|" \
+    -e "s|@GATEWAY@|${LAB_GW}|" \
+    -e "s|@DNS@|${LAB_DNS}|" \
+    -e "s|@IFNAME@|${LAB_IFNAME}|" \
     "$(lab_root)/lab/answer.toml.tpl" > "$WORK/answer.toml"
 
 proxmox-auto-install-assistant validate-answer "$WORK/answer.toml" \
@@ -108,6 +122,9 @@ rm -f "$WORK/node.qcow2"
 qemu-img create -f qcow2 "$WORK/node.qcow2" "$DISK_SIZE" >/dev/null
 
 log_info "running the Proxmox installer (10-20 min)"
+# The installer takes its address by DHCP and freezes it into a static stanza,
+# so it has to be handed LAB_NODE_IP here - hand it anything else and the node
+# is unreachable on first boot, before there is any chance to correct it.
 # -no-reboot turns the installer's final reboot into a clean QEMU exit, which
 # is how we know it finished. cache=unsafe is safe here specifically because a
 # failed build is thrown away and restarted, never resumed.
@@ -120,7 +137,7 @@ timeout 3600 qemu-system-x86_64 \
     -drive file="$WORK/node.qcow2",if=none,id=sys,format=qcow2,cache=unsafe \
     -device virtio-blk-pci,drive=sys,addr=0x10,bootindex=0 \
     -cdrom "$WORK/auto.iso" -boot d \
-    -netdev user,id=n0 -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
+    -netdev user,id=n0,net="$LAB_NET",host="$LAB_GW",dhcpstart="$LAB_NODE_IP" -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
     "${qemu_display[@]}" \
     -serial file:"$WORK/install.log" \
     -no-reboot \
@@ -136,7 +153,7 @@ qemu-system-x86_64 \
     -smp "$BUILD_CPUS" -m "$BUILD_MEM" \
     -drive file="$WORK/node.qcow2",if=none,id=sys,format=qcow2,cache=unsafe \
     -device virtio-blk-pci,drive=sys,addr=0x10,bootindex=0 \
-    -netdev user,id=n0,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-:22 \
+    -netdev user,id=n0,net="$LAB_NET",host="$LAB_GW",dhcpstart="$LAB_DHCP_START",hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$LAB_NODE_IP":22 \
     -device virtio-net-pci,netdev=n0,addr=0x11,mac="$LAB_MAC" \
     -display none -serial file:"$WORK/firstboot.log" \
     -pidfile "$WORK/qemu.pid" -daemonize
@@ -148,7 +165,13 @@ cleanup() {
 trap cleanup EXIT
 
 mapfile -t SSH_OPTS < <(node_ssh_opts)
-node_ssh() { ssh "${SSH_OPTS[@]}" -i "$SSH_KEY" -p "$SSH_PORT" root@127.0.0.1 "$@"; }
+# -n matters: without it ssh reads the caller's stdin, and when the caller is
+# itself a script being piped into `bash -s`, ssh eats the rest of the script.
+# Bash then simply runs out of input and exits 0, so the step "succeeds"
+# having done nothing. node_ssh_stdin is the deliberate exception, for
+# heredocs.
+node_ssh()       { ssh -n "${SSH_OPTS[@]}" -i "$SSH_KEY" -p "$SSH_PORT" root@127.0.0.1 "$@"; }
+node_ssh_stdin() { ssh    "${SSH_OPTS[@]}" -i "$SSH_KEY" -p "$SSH_PORT" root@127.0.0.1 "$@"; }
 
 log_info "waiting for SSH"
 for _ in $(seq 1 120); do
@@ -158,10 +181,10 @@ done
 node_ssh true 2>/dev/null || die "node never came up - see $WORK/firstboot.log"
 log_info "node is up"
 
-node_ssh "bash -s $LAB_IFNAME $LAB_MAC" <<'REMOTE'
+node_ssh_stdin "bash -s $LAB_IFNAME $LAB_MAC $LAB_NODE_IP $LAB_GW $LAB_DNS" <<'REMOTE'
 set -e
-IFNAME="$1"; MAC="$2"
-[ -n "$IFNAME" ] && [ -n "$MAC" ] || { echo "IFNAME/MAC not passed through" >&2; exit 1; }
+IFNAME="$1"; MAC="$2"; NODE_IP="$3"; GW="$4"; DNS="$5"
+[ -n "$IFNAME" ] && [ -n "$MAC" ] && [ -n "$NODE_IP" ] || { echo "args not passed through" >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
 
 # Debian's apt-daily.timer fires shortly after boot, so a freshly installed
@@ -188,6 +211,13 @@ EOF
 APT="apt-get -o DPkg::Lock::Timeout=600"
 $APT update -qq
 $APT -y -qq dist-upgrade
+# `local` ships as iso,vztmpl,backup,import - it cannot hold a disk, so there
+# is nowhere for a move test to move a volume to. Adding images and rootdir
+# gives the suite a second, always-present storage. snippets is enabled too:
+# `qm set --cicustom` accepts a snippet volume whose content type is disabled
+# and then silently ignores it.
+pvesm set local --content iso,vztmpl,backup,import,images,rootdir,snippets
+
 # Handy inside the node for every profile and test run.
 $APT install -y -qq --no-install-recommends python3-pytest python3-requests jq fio
 $APT clean
@@ -199,10 +229,13 @@ sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="quiet conso
 grep -q GRUB_TERMINAL /etc/default/grub || printf 'GRUB_TERMINAL="console serial"\nGRUB_SERIAL_COMMAND="serial --speed=115200"\n' >> /etc/default/grub
 update-grub
 
-# The installer freezes the DHCP address it saw into a static stanza. Put the
-# bridge back on DHCP so a node still works if the lab network ever differs.
-sed -i 's|^iface vmbr0 inet static|iface vmbr0 inet dhcp|' /etc/network/interfaces
-sed -i '/^\s*address 10\./d; /^\s*gateway 10\./d' /etc/network/interfaces
+# The installer already wrote a static address from the answer file; just make
+# sure it is the one the host forwards to, so a mismatch fails here rather than
+# as an unreachable node later.
+grep -q "$NODE_IP" /etc/network/interfaces || {
+    echo "installer did not configure $NODE_IP" >&2
+    exit 1
+}
 
 # Name the NIC after its (pinned) MAC instead of its PCI slot. The default
 # NamePolicy ends in `path`, which encodes PCI bus/slot geography - so simply
@@ -234,62 +267,112 @@ REMOTE
 # from them, which still exercises the target backend.
 
 log_info "baking in the LXC template"
-node_ssh 'bash -s' <<'REMOTE'
+node_ssh_stdin 'bash -s' <<'REMOTE'
 set -e
 pveam update >/dev/null
-tmpl=$(pveam available --section system | awk '{print $2}' | grep '^debian-13-standard' | sort -V | tail -1)
+# The architecture matters: sorting the whole list picks the arm64 build,
+# which installs happily and then cannot start a container.
+tmpl=$(pveam available --section system | awk '{print $2}' \
+        | grep '^debian-13-standard.*amd64' | sort -V | tail -1)
 [ -n "$tmpl" ] || { echo "no debian-13 LXC template offered" >&2; exit 1; }
 pveam download local "$tmpl" >/dev/null
+pveam list local | grep -q amd64 || { echo "no amd64 template downloaded" >&2; exit 1; }
 pveam list local
+touch /root/.lab-ct-template-ready
 REMOTE
+node_ssh "test -f /root/.lab-ct-template-ready" \
+    || die "LXC template bake did not complete"
 
 log_info "baking in the VM template (downloads a cloud image and boots it once)"
-node_ssh "bash -s $GUEST_TEMPLATE_VMID" <<'REMOTE'
+node_ssh_stdin "bash -s $GUEST_TEMPLATE_VMID" <<'REMOTE'
 set -e
 VMID="$1"
-export DEBIAN_FRONTEND=noninteractive
+BAKE_IP=10.0.2.11          # static, below the guest DHCP range, above the node
 IMG=/var/lib/vz/template/debian-13-genericcloud-amd64.qcow2
 [ -f "$IMG" ] || curl -fsSL -o "$IMG" \
     https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
 
-mkdir -p /var/lib/vz/snippets
-cat > /var/lib/vz/snippets/guest-bake.yaml <<'YAML'
-#cloud-config
-ssh_pwauth: true
-package_update: true
-packages:
-  - qemu-guest-agent
-  - fio
-runcmd:
-  - systemctl enable --now qemu-guest-agent
-  - systemctl enable qemu-guest-agent
-  - poweroff
-YAML
+[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519
 
-# local-lvm, not the storage under test: tests clone onto their own storage.
+# local-lvm, not the storage under test: tests clone onto their own storage,
+# which still exercises the target backend on every clone.
 qm create "$VMID" --name lab-guest-template --ostype l26 --cpu host \
     --cores 2 --memory 1024 --scsihw virtio-scsi-single --agent enabled=1 \
     --serial0 socket --net0 virtio,bridge=vmbr0
 qm set "$VMID" --scsi0 "local-lvm:0,import-from=$IMG,discard=on"
 qm set "$VMID" --ide2 local-lvm:cloudinit
-qm set "$VMID" --ciuser root --cipassword pvelab --ipconfig0 ip=dhcp \
-    --cicustom user=local:snippets/guest-bake.yaml --boot order=scsi0
+# A static address and an injected key, so the guest is reachable at a known
+# place the moment cloud-init finishes. The obvious alternative - a cicustom
+# snippet that installs the packages - fails silently: `snippets` is not an
+# enabled content type on `local` by default, so the snippet is ignored and
+# the guest gets templated unprovisioned, which only surfaces later as tests
+# timing out waiting for an agent that was never installed.
+qm set "$VMID" --ciuser root --cipassword pvelab \
+    --sshkeys /root/.ssh/id_ed25519.pub \
+    --ipconfig0 "ip=${BAKE_IP}/24,gw=10.0.2.2" --nameserver 10.0.2.3 \
+    --boot order=scsi0
 qm start "$VMID"
 
-# cloud-init powers the guest off when it is done, which is the signal.
-for _ in $(seq 1 180); do
-    qm status "$VMID" | grep -q stopped && break
+SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=5 -o BatchMode=yes -i /root/.ssh/id_ed25519"
+SSHQ="ssh -n $SSHOPT"          # never reads this script's stdin
+SSHIN="ssh $SSHOPT"            # for the one call that is fed a heredoc
+up=0
+for _ in $(seq 1 90); do
+    $SSHQ "root@$BAKE_IP" true 2>/dev/null && { up=1; break; }
+    sleep 4
+done
+[ "$up" = 1 ] || { echo "bake guest never became reachable at $BAKE_IP" >&2; exit 1; }
+
+# Debian's genericcloud image ships without qemu-guest-agent; the suite needs
+# it for every VM test.
+$SSHIN "root@$BAKE_IP" 'bash -s' <<'GUEST'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+# The guest is reachable as soon as sshd starts, which is well before
+# cloud-init has finished - and cloud-init runs apt. Wait for it, then stop
+# the timers that would start another one behind us.
+cloud-init status --wait >/dev/null 2>&1 || true
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl stop apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+for _ in $(seq 1 60); do
+    fuser /var/lib/apt/lists/lock /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break
     sleep 5
 done
-qm status "$VMID" | grep -q stopped || { echo "guest template never finished" >&2; exit 1; }
+apt-get() { command apt-get -o DPkg::Lock::Timeout=600 "$@"; }
+apt-get update -qq
+apt-get install -y -qq qemu-guest-agent fio
+systemctl enable qemu-guest-agent
+# Clones have no cloud-init drive, so leaving cloud-init enabled only costs
+# every boot a datasource search that cannot succeed.
+touch /etc/cloud/cloud-init.disabled
+command -v fio >/dev/null || { echo "fio missing" >&2; exit 1; }
+GUEST
 
-# cloud-init runcmd runs once per instance-id and clones get fresh ones, so a
-# clone would re-run the install and promptly power itself off. Strip it.
-qm set "$VMID" --delete cicustom
+# Prove the agent actually answers before templating. This is the check whose
+# absence let an unprovisioned template ship.
+$SSHQ "root@$BAKE_IP" 'systemctl start qemu-guest-agent' || true
+agent_ok=0
+for _ in $(seq 1 45); do
+    qm agent "$VMID" ping >/dev/null 2>&1 && { agent_ok=1; break; }
+    sleep 2
+done
+[ "$agent_ok" = 1 ] || { echo "guest agent did not answer after install" >&2; exit 1; }
+
+$SSHQ "root@$BAKE_IP" 'systemctl poweroff' 2>/dev/null || true
+for _ in $(seq 1 90); do
+    qm status "$VMID" | grep -q stopped && break
+    sleep 2
+done
+qm status "$VMID" | grep -q stopped || { echo "bake guest never powered off" >&2; exit 1; }
+
 qm set "$VMID" --delete ide2
 qm template "$VMID"
-qm config "$VMID" | grep -E 'template|scsi0'
+qm config "$VMID" | grep -q '^template: 1' || { echo "not a template" >&2; exit 1; }
+touch /root/.lab-vm-template-ready
+echo "VM template ready"
 REMOTE
+node_ssh "test -f /root/.lab-vm-template-ready" \
+    || die "VM template bake did not complete"
 
 # The rename only takes effect on the next boot, so verify it here rather than
 # discovering it in every lab that uses the image.

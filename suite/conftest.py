@@ -51,6 +51,22 @@ needs_lxc = pytest.mark.skipif(
     not cap("SUPPORTS_LXC"), reason="storage does not support containers")
 needs_images = pytest.mark.skipif(
     not cap("SUPPORTS_IMAGES"), reason="storage does not support VM images")
+# Not every backend expresses a volume's size as a filesystem the guest can
+# see. A quota-backed container rootfs is a directory on a much larger
+# filesystem: the limit is real and enforced, but `df` inside the guest reports
+# the whole filesystem, so a resize is invisible from in there.
+# Size enforcement is universal, not a bcachefs concern: lvm-thin enforces with
+# the LV size, ZFS with a refquota, a directory storage with the size of the raw
+# image, bcachefs with a project quota. A backend that hands out a volume whose
+# stated size is not a limit is a backend that will silently fill its pool.
+needs_size_enforcement = pytest.mark.skipif(
+    not cap("ENFORCES_VOLUME_SIZE"),
+    reason="storage does not enforce volume sizes")
+needs_tpm = pytest.mark.skipif(
+    not cap("SUPPORTS_TPM"), reason="storage does not support TPM state volumes")
+needs_guest_visible_size = pytest.mark.skipif(
+    not cap("RESIZE_VISIBLE_IN_GUEST"),
+    reason="volume size is not visible to the guest on this backend")
 
 
 # ── Session fixtures ─────────────────────────────────────────────────────────
@@ -69,6 +85,21 @@ def pve() -> PVE:
 @pytest.fixture(scope="session")
 def node(pve) -> str:
     return pve.node()
+
+
+@pytest.fixture(scope="session")
+def nodes(pve) -> list[str]:
+    return sorted(entry["node"] for entry in pve.get("/nodes"))
+
+
+@pytest.fixture(scope="session")
+def node2(nodes) -> str:
+    """The second node, for migration. The lab is single-node by default -
+    these backends are local, so a second node costs a full data copy and adds
+    little - but the tests exist so a two-node lab covers them immediately."""
+    if len(nodes) < 2:
+        pytest.skip("migration needs a second node; this lab has one")
+    return nodes[1]
 
 
 @pytest.fixture(scope="session")

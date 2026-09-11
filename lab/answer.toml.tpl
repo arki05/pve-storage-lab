@@ -18,7 +18,17 @@ root-ssh-keys = ["@ROOT_SSH_KEY@"]
 reboot-on-error = true
 
 [network]
-source = "from-dhcp"
+# Static, not from-dhcp. The lab network is always the same user-mode net, so
+# there is nothing to discover - and a DHCP address is actively harmful here:
+# the host forwards its SSH port to one fixed guest address, and any test guest
+# that bridges onto vmbr0 can take that address out from under the node.
+source = "from-answer"
+cidr = "@NODE_CIDR@"
+gateway = "@GATEWAY@"
+dns = "@DNS@"
+# Match on the MAC-derived name so the filter survives a PCI topology change,
+# for the same reason the installed system names its NIC that way.
+filter.ID_NET_NAME_MAC = "@IFNAME@"
 
 [disk-setup]
 filesystem = "ext4"

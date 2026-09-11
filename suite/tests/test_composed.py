@@ -118,3 +118,110 @@ class TestDaemonRestart:
         status = {s["storage"]: s for s in pve.get("/nodes/%s/storage" % node)}
         assert status[storage]["active"], f"{storage} is not active after restart"
         assert ct.status() == "running"
+
+
+@needs_images
+class TestBackupChains:
+    def test_backup_resize_restore_gives_back_the_original_size(
+            self, create_vm, pve, node, storage):
+        """Restoring an old backup over a resized guest must restore the size
+        the backup was taken at, not silently keep the larger one."""
+        vm = create_vm()
+        original = _size_bytes(pve, node, vm.vmid)
+        wait_for_task(pve, pve.create(
+            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage="local",
+            mode="stop", compress="zstd", remove=0,
+        ), timeout=1800)
+
+        pve.set(f"/nodes/{node}/qemu/{vm.vmid}/resize", disk="scsi0", size="+2G")
+        assert _size_bytes(pve, node, vm.vmid) > original
+
+        dumps = [c for c in pve.storage_content("local", content="backup")
+                 if c.get("vmid") == vm.vmid]
+        archive = sorted(dumps, key=lambda c: c.get("ctime", 0))[-1]["volid"]
+        wait_for_task(pve, pve.create(
+            f"/nodes/{node}/qemu", vmid=vm.vmid, archive=archive,
+            storage=storage, force=1,
+        ), timeout=1800)
+        assert _size_bytes(pve, node, vm.vmid) == original, (
+            "restoring a backup taken before the resize did not restore the "
+            "original disk size"
+        )
+
+    def test_backup_while_the_guest_is_writing(self, create_vm, pve, node):
+        vm = create_vm()
+        vm.start()
+        vm.wait_agent()
+        agent = vm.agent()
+        agent.run(
+            "nohup fio --name=load --filename=/srv/fio-backup.dat --size=256M "
+            "--rw=randwrite --bs=4k --verify=crc32c --do_verify=1 "
+            "--time_based --runtime=60 --output=/srv/fio-backup.out "
+            ">/dev/null 2>&1 & echo started")
+        time.sleep(8)
+        wait_for_task(pve, pve.create(
+            f"/nodes/{node}/vzdump", vmid=vm.vmid, storage="local",
+            mode="snapshot", compress="zstd", remove=0,
+        ), timeout=1800)
+        assert vm.status() == "running", "the backup stopped a running guest"
+
+
+@needs_images
+class TestOnlineResize:
+    def test_online_resize_preserves_data(self, create_vm, pve, node):
+        """Growing a disk under a running guest, which is a different code
+        path from growing a stopped one."""
+        vm = create_vm()
+        vm.start()
+        vm.wait_agent()
+        guard = DataGuard(vm.agent()).seed()
+        pve.set(f"/nodes/{node}/qemu/{vm.vmid}/resize", disk="scsi0", size="+1G")
+        time.sleep(5)
+        guard.verify("after an online resize")
+
+    def test_online_resize_under_load(self, create_vm, pve, node):
+        vm = create_vm()
+        vm.start()
+        vm.wait_agent()
+        agent = vm.agent()
+        agent.run(
+            "nohup fio --name=load --filename=/srv/fio-resize.dat --size=192M "
+            "--rw=randwrite --bs=4k --verify=crc32c --do_verify=1 "
+            "--time_based --runtime=45 --output=/srv/fio-resize.out "
+            ">/dev/null 2>&1 & echo started")
+        time.sleep(6)
+        pve.set(f"/nodes/{node}/qemu/{vm.vmid}/resize", disk="scsi0", size="+1G")
+        for _ in range(60):
+            if agent.exec("pgrep -x fio")["exitcode"] != 0:
+                break
+            time.sleep(2)
+        out = agent.read_file("/srv/fio-resize.out")
+        assert "err= 0" in out or "Run status" in out, (
+            f"fio reported errors across an online resize:\n{out[-1500:]}"
+        )
+
+
+@needs_snapshots
+@needs_images
+class TestConcurrentSnapshots:
+    def test_two_guests_snapshotted_at_once(self, create_vm, pve, node):
+        """Concurrent snapshot creation has caught backends that build a
+        temporary name from something not unique per guest."""
+        first = create_vm(name="concurrent-a")
+        second = create_vm(name="concurrent-b")
+        for vm in (first, second):
+            vm.start()
+            vm.wait_agent()
+            DataGuard(vm.agent()).seed(size_mb=4, count=1)
+
+        upids = [pve.create(f"/nodes/{node}/qemu/{vm.vmid}/snapshot",
+                            snapname="concurrent") for vm in (first, second)]
+        for upid in upids:
+            wait_for_task(pve, upid, timeout=600)
+
+        for vm in (first, second):
+            names = [s["name"] for s in
+                     pve.get(f"/nodes/{node}/qemu/{vm.vmid}/snapshot")]
+            assert "concurrent" in names, (
+                f"VM {vm.vmid} has no snapshot after a concurrent create: {names}"
+            )

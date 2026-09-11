@@ -1,6 +1,6 @@
 """Growing a volume, and the guest actually seeing the new size."""
 
-from conftest import needs_lxc, needs_images
+from conftest import needs_lxc, needs_images, needs_guest_visible_size
 from helpers.data_guard import DataGuard
 from helpers.wait import wait_for, wait_for_task
 
@@ -24,6 +24,7 @@ class TestVMResize:
         vm.wait_agent()
         guard.verify("after resize")
 
+    @needs_guest_visible_size
     def test_guest_sees_the_new_size(self, create_vm, pve, node):
         vm = create_vm()
         vm.start()
@@ -48,6 +49,7 @@ class TestCTResize:
         pve.set(f"/nodes/{node}/lxc/{ct.vmid}/resize", disk="rootfs", size="+1G")
         guard.verify("after resize")
 
+    @needs_guest_visible_size
     def test_container_sees_the_new_size(self, create_ct, pve, node):
         ct = create_ct(start=True, disk_gb=2)
         before = _disk_gb(ct.exec())
