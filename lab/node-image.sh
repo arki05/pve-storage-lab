@@ -25,7 +25,9 @@ VARIANT="base"
 FORCE=0
 MEM="${NODE_IMAGE_MEM:-4096}"
 CPUS="${NODE_IMAGE_CPUS:-2}"
-BUILD_PORT="${NODE_IMAGE_PORT:-25599}"
+# Derived from the node index: two builders running at once would otherwise
+# contend for the same forward, and the loser boots a machine nobody can reach.
+BUILD_PORT="${NODE_IMAGE_PORT:-0}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -37,6 +39,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$NODE" ]] || die "--node is required"
+[[ "$BUILD_PORT" != 0 ]] || BUILD_PORT=$((25590 + NODE))
 
 STATE="$(lab_state_dir)"
 BASE="$STATE/images/pve-${PVE_VERSION}-${VARIANT}.qcow2"

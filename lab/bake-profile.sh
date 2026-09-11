@@ -30,8 +30,15 @@ FORCE=0
 MEM="${BAKE_MEM:-6144}"
 CPUS="${BAKE_CPUS:-4}"
 SSH_PORT="${BAKE_SSH_PORT:-25523}"
+# The base image has management on DHCP and a separate NIC for the guest
+# bridge, so a bake boots both and hands the node the address it forwards to.
+# Attaching only the management NIC leaves vmbr0 with no port and the node
+# unreachable - it boots to a login prompt and nothing says why.
 NODE_IP="${LAB_NODE_IP:-10.0.2.10}"
 MAC="${LAB_MAC:-52:54:00:1a:b0:01}"
+GUEST_MAC="${LAB_GUEST_MAC:-52:54:00:1a:b1:01}"
+GUEST_NET="${LAB_GUEST_NET:-10.0.99.0/24}"
+GUEST_GW="${LAB_GUEST_GW:-10.0.99.2}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -79,8 +86,10 @@ qemu-system-x86_64 \
     -enable-kvm -cpu host -machine q35 -smp "$CPUS" -m "$MEM" \
     -drive file="$WORK/node.qcow2",if=none,id=sys,format=qcow2,cache=unsafe \
     -device virtio-blk-pci,drive=sys,addr=0x10,bootindex=0 \
-    -netdev user,id=n0,net=10.0.2.0/24,host=10.0.2.2,dhcpstart=10.0.2.20,hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$NODE_IP":22 \
-    -device virtio-net-pci,netdev=n0,addr=0x11,mac="$MAC" \
+    -netdev user,id=mgmt,net=10.0.2.0/24,host=10.0.2.2,dhcpstart="$NODE_IP",hostfwd=tcp:127.0.0.1:"$SSH_PORT"-"$NODE_IP":22 \
+    -device virtio-net-pci,netdev=mgmt,addr=0x11,mac="$MAC" \
+    -netdev user,id=guest,net="$GUEST_NET",host="$GUEST_GW" \
+    -device virtio-net-pci,netdev=guest,addr=0x12,mac="$GUEST_MAC" \
     -display none -serial file:"$WORK/console.log" \
     -pidfile "$WORK/qemu.pid" -daemonize
 

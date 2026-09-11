@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""The lab's command line.
+
+    lab up --nodes 2 --disks 4        bring a lab up
+    lab down --reset                  stop it, optionally discarding its disks
+    lab ssh --node 2 [command...]     shell into a node
+    lab status                        what is running
+
+Orchestration lives in Python; everything that executes on a node stays shell,
+pushed as a file and run with arguments.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from labkit import lab as lab_mod   # noqa: E402
+from labkit import nodes as ident   # noqa: E402
+from labkit import state            # noqa: E402
+from labkit.qemu import Machine     # noqa: E402
+
+
+def _shell_node_image(index: int, variant: str) -> None:
+    """Build a node image with the shell builder.
+
+    Still shell while the port is in progress. The Python side calls it the
+    way a user would, so replacing it later changes nothing here.
+    """
+    subprocess.run(
+        ["bash", str(ROOT / "lab" / "node-image.sh"),
+         "--node", str(index), "--variant", variant],
+        check=True)
+
+
+def cmd_up(args) -> int:
+    env = lab_mod.up(
+        name=args.name, count=args.nodes, disks=args.disks,
+        disk_size=args.disk_size, mem=args.mem, cpus=args.cpus,
+        variant=args.variant, reuse=args.reuse, fresh=args.fresh,
+        ensure_image=_shell_node_image,
+    )
+    if args.nodes > 1:
+        subprocess.run(["bash", str(ROOT / "lab" / "cluster.sh"),
+                        "--name", args.name], check=True)
+    for key, value in env.items():
+        print(f"{key}={value}")
+    return 0
+
+
+def cmd_down(args) -> int:
+    lab_mod.down(args.name, reset=args.reset)
+    return 0
+
+
+def cmd_ssh(args) -> int:
+    env = lab_mod.read_env(args.name)
+    port = env.get(f"NODE{args.node}_SSH_PORT", env["NODE_SSH_PORT"])
+    argv = ["ssh", "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+            "-i", env["NODE_SSH_KEY"], "-p", str(port), "root@127.0.0.1"]
+    command = [a for a in args.command if a != "--"]
+    os.execvp("ssh", argv + command)
+
+
+def cmd_status(args) -> int:
+    lab = state.lab_dir(args.name)
+    if lab.exists():
+        running = False
+        for workdir in sorted(lab.glob("node*")):
+            machine = Machine(workdir.name, Path("/"), workdir)
+            node = ident.Node(int(workdir.name.removeprefix("node")))
+            if machine.running():
+                running = True
+                print(f"{node.hostname:12} running  pid {machine.pid():<8} "
+                      f"ssh 127.0.0.1:{node.ssh_port}  mgmt {node.mgmt_ip}")
+            else:
+                print(f"{node.hostname:12} stopped")
+        if not running:
+            print(f"lab '{args.name}': no nodes running")
+    else:
+        print(f"lab '{args.name}': not created")
+    print("\nimages:")
+    for image in sorted(state.images_dir().glob("*.qcow2")):
+        print(f"  {image.name:42} {image.stat().st_size / (1 << 30):5.1f}G")
+    return 0
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s",
+                        datefmt="%H:%M:%S")
+    parser = argparse.ArgumentParser(
+        prog="lab", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    up = sub.add_parser("up", help="bring a lab up")
+    up.add_argument("--name", default="lab")
+    up.add_argument("--nodes", type=int, default=1)
+    up.add_argument("--disks", type=int, default=4)
+    up.add_argument("--disk-size", default="8G")
+    up.add_argument("--mem", type=int, default=6144)
+    up.add_argument("--cpus", type=int, default=4)
+    up.add_argument("--variant", default="base")
+    up.add_argument("--reuse", action="store_true")
+    up.add_argument("--fresh", action="store_true")
+    up.set_defaults(func=cmd_up)
+
+    down = sub.add_parser("down", help="stop a lab")
+    down.add_argument("--name", default="lab")
+    down.add_argument("--reset", action="store_true")
+    down.set_defaults(func=cmd_down)
+
+    sh = sub.add_parser("ssh", help="shell into a node")
+    sh.add_argument("--name", default="lab")
+    sh.add_argument("--node", type=int, default=1)
+    sh.add_argument("command", nargs=argparse.REMAINDER)
+    sh.set_defaults(func=cmd_ssh)
+
+    st = sub.add_parser("status", help="what is running")
+    st.add_argument("--name", default="lab")
+    st.set_defaults(func=cmd_status)
+
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

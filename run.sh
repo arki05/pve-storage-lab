@@ -205,15 +205,23 @@ for i in "${!P_DIR[@]}"; do
         node_ssh_at "$n" "rm -rf /root/lab-profile-$pname && mkdir -p /root/lab-profile-$pname"
         node_push_at "$n" "${P_DIR[$i]}" "/root/lab-profile-$pname"
     done
+    # Tests run on node 1 only, so they go there only.
     if [[ -n "${P_TESTS[$i]}" ]]; then
         log_info "adding $pname tests from ${P_TESTS[$i]}"
         node_ssh "mkdir -p /root/lab-tests-$pname"
         node_push "${P_TESTS[$i]}" "/root/lab-tests-$pname"
     fi
+    # The source under test goes to *every* node. A storage plugin is a Perl
+    # module on each node and a patch to each node's pve-container; shipping it
+    # to node 1 alone leaves the others running whatever the repository had,
+    # and the cluster then behaves differently depending on which node a guest
+    # happens to be on.
     if [[ -n "${P_SOURCE[$i]}" ]]; then
         log_info "shipping $pname source under test from ${P_SOURCE[$i]}"
-        node_ssh "rm -rf /root/lab-source-$pname && mkdir -p /root/lab-source-$pname"
-        node_push "${P_SOURCE[$i]}" "/root/lab-source-$pname"
+        for ((n = 1; n <= NODE_COUNT; n++)); do
+            node_ssh_at "$n" "rm -rf /root/lab-source-$pname && mkdir -p /root/lab-source-$pname"
+            node_push_at "$n" "${P_SOURCE[$i]}" "/root/lab-source-$pname"
+        done
     fi
 done
 
