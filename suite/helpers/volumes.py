@@ -15,10 +15,22 @@ which fills the source pool one migration at a time.
 """
 
 
+# Only volumes that can hold a guest's disk. Guest VMIDs are reused - PVE hands
+# out the lowest free id, so a destroyed guest's number comes straight back -
+# which means backups from earlier tests are still filed under the same vmid.
+# Counting those as "left behind on the source" makes every move look broken.
+DISK_CONTENT = ("images", "rootdir")
+
+
 def volumes_for(pve, storage: str, vmid: int) -> list[str]:
-    return [entry["volid"] for entry in pve.storage_content(storage)
-            if entry.get("vmid") == vmid or f"-{vmid}-" in entry["volid"]
-            or f":{vmid}/" in entry["volid"]]
+    found = []
+    for entry in pve.storage_content(storage):
+        if entry.get("content") not in DISK_CONTENT:
+            continue
+        volid = entry["volid"]
+        if entry.get("vmid") == vmid or f"-{vmid}-" in volid or f":{vmid}/" in volid:
+            found.append(volid)
+    return found
 
 
 def assert_relocated(pve, guest, key: str, source: str, destination: str,
