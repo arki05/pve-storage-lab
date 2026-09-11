@@ -15,6 +15,7 @@ its MAC rather than its PCI slot: a name derived from a PCI slot moves the
 moment a test disk is added.
 """
 
+import zlib
 from dataclasses import dataclass
 
 # The base image's own MACs. A node image's first boot presents these, because
@@ -36,11 +37,26 @@ def _ifname(mac: str) -> str:
     return "enx" + mac.replace(":", "")
 
 
+def port_offset(lab: str = "lab") -> int:
+    """A per-lab port offset, so two labs can run on one host.
+
+    Ports used to come from the node index alone, which is fine until a second
+    lab exists and immediately fails to start because the first one holds the
+    forward. Derived from the name rather than allocated, so every phase
+    computes the same answer without having to record it.
+    """
+    if lab == "lab":
+        return 0
+    return (zlib.crc32(lab.encode()) % 40 + 1) * 100
+
+
 @dataclass(frozen=True)
 class Node:
-    """One lab node. Immutable, derived entirely from its index."""
+    """One lab node. Immutable, derived entirely from its index and the lab it
+    belongs to."""
 
     index: int
+    lab: str = "lab"
 
     @property
     def hostname(self) -> str:
@@ -102,12 +118,12 @@ class Node:
     # Ports ten apart, so a node has room for more forwards later.
     @property
     def ssh_port(self) -> int:
-        return BASE_SSH_PORT + (self.index - 1) * 10
+        return BASE_SSH_PORT + port_offset(self.lab) + (self.index - 1) * 10
 
     @property
     def gui_port(self) -> int:
-        return BASE_GUI_PORT + (self.index - 1) * 10
+        return BASE_GUI_PORT + port_offset(self.lab) + (self.index - 1) * 10
 
 
-def nodes(count: int) -> list[Node]:
-    return [Node(i) for i in range(1, count + 1)]
+def nodes(count: int, lab: str = "lab") -> list[Node]:
+    return [Node(i, lab) for i in range(1, count + 1)]

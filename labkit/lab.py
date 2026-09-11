@@ -61,7 +61,7 @@ def up(name: str = "lab", count: int = 1, disks: int = 4, disk_size: str = "8G",
     them until the cluster forms."""
     lab = state.lab_dir(name)
     key = state.ssh_key()
-    wanted = ident.nodes(count)
+    wanted = ident.nodes(count, name)
 
     running = [n for n in wanted
                if Machine(f"node{n.index}", Path("/"), lab / f"node{n.index}").running()]

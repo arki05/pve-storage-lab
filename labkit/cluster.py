@@ -36,7 +36,7 @@ def form(name: str = "lab", count: int = 2) -> None:
         return
 
     key = state.ssh_key()
-    members = ident.nodes(count)
+    members = ident.nodes(count, name)
     conns = {n.index: NodeSSH(n.ssh_port, key) for n in members}
 
     if conns[1].ok("pvecm status"):

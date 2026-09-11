@@ -96,7 +96,7 @@ def cmd_status(args) -> int:
         running = False
         for workdir in sorted(lab.glob("node*")):
             machine = Machine(workdir.name, Path("/"), workdir)
-            node = ident.Node(int(workdir.name.removeprefix("node")))
+            node = ident.Node(int(workdir.name.removeprefix("node")), args.name)
             if machine.running():
                 running = True
                 print(f"{node.hostname:12} running  pid {machine.pid():<8} "
