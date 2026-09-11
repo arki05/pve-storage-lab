@@ -2,7 +2,8 @@
 
 import pytest
 
-from conftest import needs_snapshots, needs_lxc, needs_images
+from conftest import (needs_snapshots, needs_lxc, needs_images,
+                      needs_rollback_past_newer)
 from helpers.data_guard import DataGuard
 from helpers.wait import wait_for_task
 
@@ -61,19 +62,29 @@ class TestVMSnapshot:
         names = [s["name"] for s in pve.get(f"/nodes/{node}/qemu/{vm.vmid}/snapshot")]
         assert "doomed" not in names
 
-    def test_multiple_snapshots_are_independent(self, create_vm, pve, node):
-        vm = create_vm()
+    def _stage(self, vm, pve, node, count=3):
+        """Write a marker, snapshot, repeat. Leaves the guest stopped."""
         vm.start()
         vm.wait_agent()
         agent = vm.agent()
-
-        for i in range(3):
+        for i in range(count):
             agent.write_file(f"/srv/stage{i}.txt", f"stage {i}")
             agent.run("sync")
             wait_for_task(pve, pve.create(
                 f"/nodes/{node}/qemu/{vm.vmid}/snapshot", snapname=f"s{i}"))
-
         vm.shutdown()
+
+    @needs_rollback_past_newer
+    def test_rollback_past_a_newer_snapshot_keeps_it(self, create_vm, pve, node):
+        """Roll back to s1 while s2 exists, and keep s2.
+
+        Only some backends can do this. ZFS refuses - it can roll back to the
+        most recent snapshot only - so this is capability-gated rather than
+        being a failure there.
+        """
+        vm = create_vm()
+        self._stage(vm, pve, node)
+
         wait_for_task(pve, pve.create(
             f"/nodes/{node}/qemu/{vm.vmid}/snapshot/s1/rollback"), 300)
         vm.start()
@@ -83,8 +94,34 @@ class TestVMSnapshot:
         assert "stage 0" in agent.read_file("/srv/stage0.txt")
         assert "stage 1" in agent.read_file("/srv/stage1.txt")
         assert agent.exec("test -e /srv/stage2.txt")["exitcode"] != 0, (
-            "a snapshot taken after the rollback target was still visible"
-        )
+            "a snapshot taken after the rollback target was still visible")
+
+        names = [s["name"] for s in
+                 pve.get(f"/nodes/{node}/qemu/{vm.vmid}/snapshot")]
+        assert "s2" in names, (
+            "rolling back to s1 destroyed the newer snapshot s2; this backend "
+            "should have kept it")
+
+    def test_rollback_after_discarding_newer_snapshots(self, create_vm, pve, node):
+        """The portable form: drop the newer snapshots first, then roll back.
+
+        Works on every backend, because it never asks one to roll back past a
+        snapshot it still holds.
+        """
+        vm = create_vm()
+        self._stage(vm, pve, node)
+
+        wait_for_task(pve, pve.delete(
+            f"/nodes/{node}/qemu/{vm.vmid}/snapshot/s2"), 300)
+        wait_for_task(pve, pve.create(
+            f"/nodes/{node}/qemu/{vm.vmid}/snapshot/s1/rollback"), 300)
+        vm.start()
+        vm.wait_agent()
+        agent = vm.agent()
+
+        assert "stage 0" in agent.read_file("/srv/stage0.txt")
+        assert "stage 1" in agent.read_file("/srv/stage1.txt")
+        assert agent.exec("test -e /srv/stage2.txt")["exitcode"] != 0
 
 
 @needs_lxc

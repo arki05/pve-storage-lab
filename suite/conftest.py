@@ -77,6 +77,15 @@ needs_size_enforcement = pytest.mark.skipif(
 # different guarantee: rollback has to restore a *running process*, not just a
 # disk. `vmstatestorage` is what makes it a storage test: without it PVE picks
 # a storage of its own and the backend under test is never exercised.
+# ZFS can only roll back to the *most recent* snapshot: going further back
+# means destroying the ones in between, and it refuses rather than doing that
+# silently. btrfs and bcachefs will roll back to any snapshot and keep the
+# newer ones. Neither is wrong, and the difference is worth recording rather
+# than papering over - a backup strategy built on "roll back to last Tuesday"
+# works on one and not the other.
+needs_rollback_past_newer = pytest.mark.skipif(
+    not cap("ROLLBACK_PAST_NEWER_SNAPSHOTS"),
+    reason="storage cannot roll back past a newer snapshot")
 needs_vmstate = pytest.mark.skipif(
     not cap("SUPPORTS_VMSTATE"),
     reason="storage does not hold VM state volumes")
