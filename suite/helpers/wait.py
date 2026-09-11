@@ -32,7 +32,13 @@ def wait_for_task(pve, upid, timeout: int = 300) -> None:
     if not isinstance(upid, str) or not upid.startswith("UPID"):
         return
 
-    node = pve.node()
+    # A UPID carries the node it ran on: UPID:<node>:<pid>:<pstart>:<start>:...
+    # Asking any other node for it is a 500, which is how every migration test
+    # failed the first time this ran on a cluster - the task belongs to the
+    # node the guest was on *before* it moved, not to whichever node the client
+    # happens to be pointed at.
+    parts = upid.split(":")
+    node = parts[1] if len(parts) > 2 and parts[1] else pve.node()
     start = time.time()
     while time.time() - start < timeout:
         status = pve.get(f"/nodes/{node}/tasks/{upid}/status")

@@ -8,11 +8,34 @@ interface, and we are already local.
 
 import base64
 import json
+import shlex
+import socket
 import subprocess
 
 
 class GuestExecError(RuntimeError):
     pass
+
+
+def _local_node() -> str:
+    return socket.gethostname()
+
+
+def _wrap_for_node(node: str | None, argv: list[str]) -> list[str]:
+    """Run argv on `node`, going over SSH if that is not this machine.
+
+    `qm` and `pct` only act on guests that live on the node they run on, so
+    after a migration the same command has to be issued somewhere else. The
+    whole remote command is quoted as one token: without that, `bash -c 'md5sum
+    /srv/x'` arrives at the far end as `bash -c md5sum /srv/x`, which runs
+    md5sum with no argument against empty stdin and cheerfully returns the
+    checksum of nothing.
+    """
+    if node is None or node == _local_node():
+        return argv
+    remote = " ".join(shlex.quote(part) for part in argv)
+    return ["ssh", "-n", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+            node, remote]
 
 
 class _Exec:
@@ -40,12 +63,15 @@ class _Exec:
 class GuestAgent(_Exec):
     """Commands inside a VM, via the QEMU guest agent."""
 
-    def __init__(self, vmid: int):
+    def __init__(self, vmid: int, node: str | None = None):
         self.vmid = vmid
+        self.node = node
 
     def exec(self, command: str, timeout: int = 60) -> dict:
         proc = subprocess.run(
-            ["qm", "guest", "exec", str(self.vmid), "--", "bash", "-c", command],
+            _wrap_for_node(self.node,
+                           ["qm", "guest", "exec", str(self.vmid), "--",
+                            "bash", "-c", command]),
             capture_output=True, text=True, timeout=timeout,
         )
         if proc.returncode != 0 and not proc.stdout:
@@ -67,12 +93,15 @@ class GuestAgent(_Exec):
 class ContainerExec(_Exec):
     """Commands inside an LXC container, via pct exec."""
 
-    def __init__(self, vmid: int):
+    def __init__(self, vmid: int, node: str | None = None):
         self.vmid = vmid
+        self.node = node
 
     def exec(self, command: str, timeout: int = 60) -> dict:
         proc = subprocess.run(
-            ["pct", "exec", str(self.vmid), "--", "bash", "-c", command],
+            _wrap_for_node(self.node,
+                           ["pct", "exec", str(self.vmid), "--",
+                            "bash", "-c", command]),
             capture_output=True, text=True, timeout=timeout,
         )
         return {"exitcode": proc.returncode, "stdout": proc.stdout,

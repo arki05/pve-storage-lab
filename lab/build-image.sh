@@ -242,9 +242,13 @@ grep -q "$NODE_IP" /etc/network/interfaces || {
 # attaching another test disk renamed the NIC, left vmbr0 bridging a port that
 # no longer existed, and the node booted to a login prompt with an address in
 # its banner and no reachable network. `mac` is immune to PCI topology.
+# Matched on the driver rather than on one MAC: a two-node lab gives each node
+# a second NIC for the cluster link, and anything not covered here falls back
+# to the default policy - which ends at `path`, derives the name from the PCI
+# slot, and moves the moment a test disk is added.
 cat > /etc/systemd/network/10-lab-net.link <<EOF
 [Match]
-MACAddress=$MAC
+Driver=virtio_net
 
 [Link]
 NamePolicy=mac

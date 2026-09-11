@@ -93,13 +93,17 @@ def nodes(pve) -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def node2(nodes) -> str:
-    """The second node, for migration. The lab is single-node by default -
-    these backends are local, so a second node costs a full data copy and adds
-    little - but the tests exist so a two-node lab covers them immediately."""
-    if len(nodes) < 2:
+def node2(pve) -> str:
+    """A node other than the one the tests run on, for migration.
+
+    The lab is single-node by default - these backends are local, so a second
+    node costs a full data copy and adds little - but the tests exist so a
+    two-node lab covers them immediately.
+    """
+    other = pve.other_node()
+    if other is None:
         pytest.skip("migration needs a second node; this lab has one")
-    return nodes[1]
+    return other
 
 
 @pytest.fixture(scope="session")
@@ -196,7 +200,9 @@ class LabVM(LabGuest):
     kind = "qemu"
 
     def agent(self) -> GuestAgent:
-        return GuestAgent(self.vmid)
+        # Bound to the node the guest is on right now, which a migration
+        # changes underneath the test.
+        return GuestAgent(self.vmid, self.node)
 
     def wait_agent(self, timeout: int = 240) -> None:
         def ping() -> bool:
@@ -220,7 +226,7 @@ class LabCT(LabGuest):
     kind = "lxc"
 
     def exec(self) -> ContainerExec:
-        return ContainerExec(self.vmid)
+        return ContainerExec(self.vmid, self.node)
 
 
 # ── Factories ────────────────────────────────────────────────────────────────

@@ -63,6 +63,33 @@ them as `/dev/disk/by-id/virtio-labdiskN` rather than guessing at `vdb`. Ask
 for as many as the backend needs — multi-device behaviour (replication,
 targets, erasure coding) is not testable on one disk.
 
+## Two nodes
+
+```bash
+bash run.sh --profile-dir ./profiles/zfs --nodes 2
+```
+
+Migration is the only reason this exists — PVE cannot move a guest between
+unclustered nodes — and it stays opt-in so single-node runs are unchanged.
+
+The nodes talk over a **QEMU socket netdev**: a raw L2 link between QEMU
+processes, entirely in userspace. No tap, no bridge, so still no
+`/dev/net/tun` and no `NET_ADMIN` — `/dev/kvm` remains the only elevated thing
+the runner has.
+
+Both nodes keep the **same management MAC and address**. Each node's user-mode
+network is its own isolated segment, so there is nothing to collide, and the
+image needs no per-node variation. Only the cluster NIC differs.
+
+That trick has one sharp edge worth knowing if you extend this: because every
+node answers on `10.0.2.10`, a peer that resolves a node name to its management
+address reaches **itself**. PVE keeps a node's address in `/etc/pve/.members`
+from exactly that lookup and uses it to ssh between nodes, so leaving the
+installer's `/etc/hosts` line in place makes a node migrate a guest to itself,
+deadlock on a lock it already holds, and leave the guest locked. `cluster.sh`
+strips those entries and then asserts each node resolves its own name to the
+cluster address before going any further.
+
 ## Testing several storages at once
 
 ```bash

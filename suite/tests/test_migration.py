@@ -19,6 +19,13 @@ def _migrate(pve, node, kind, vmid, target, online=False, timeout=1800):
     wait_for_task(pve, pve.create(f"/nodes/{node}/{kind}/{vmid}/migrate",
                                   target=target, online=1 if online else 0),
                   timeout=timeout)
+    # The migrate task finishes before the guest's lock is released, so
+    # starting it straight afterwards fails with "VM is locked (migrate)".
+    # Waiting on the task is not enough on its own.
+    def unlocked() -> bool:
+        return not pve.get(f"/nodes/{target}/{kind}/{vmid}/config").get("lock")
+    wait_for(unlocked, timeout=180, interval=2,
+             desc=f"{kind} {vmid} lock to clear after migrating to {target}")
 
 
 @needs_images

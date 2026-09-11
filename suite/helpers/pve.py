@@ -9,6 +9,7 @@ not worth optimising away.
 """
 
 import json
+import socket
 import subprocess
 
 
@@ -57,10 +58,26 @@ class PVE:
     # ── Convenience ──────────────────────────────────────────────────────────
 
     def node(self) -> str:
-        """The single node this lab runs. Multi-node is out of scope: the
-        storage backends this suite targets are local, so a second node adds
-        a data copy and little coverage."""
-        return self.get("/nodes")[0]["node"]
+        """The node these tests are running on.
+
+        Deliberately the local hostname rather than /nodes[0]: that list comes
+        back in no particular order, so on a cluster it can name the *other*
+        node - which made tests migrate a guest to the node it was already on,
+        and look for the VM template on the node that does not have it.
+        """
+        local = socket.gethostname()
+        names = [entry["node"] for entry in self.get("/nodes")]
+        if local in names:
+            return local
+        return sorted(names)[0]
+
+    def other_node(self) -> str | None:
+        """A node that is not this one, or None on a single-node lab."""
+        here = self.node()
+        for name in sorted(entry["node"] for entry in self.get("/nodes")):
+            if name != here:
+                return name
+        return None
 
     def nextid(self) -> int:
         return int(self.get("/cluster/nextid"))

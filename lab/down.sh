@@ -21,18 +21,22 @@ done
 LAB="$(lab_state_dir)/labs/$NAME"
 [[ -d "$LAB" ]] || { log_info "no such lab: $NAME"; exit 0; }
 
-if [[ -f "$LAB/qemu.pid" ]]; then
-    pid=$(cat "$LAB/qemu.pid")
+# Every node, plus the single-node layout from before nodes had directories.
+for pidfile in "$LAB"/node*/qemu.pid "$LAB"/qemu.pid; do
+    [[ -f "$pidfile" ]] || continue
+    pid=$(cat "$pidfile")
     if kill -0 "$pid" 2>/dev/null; then
-        log_info "stopping lab '$NAME' (pid $pid)"
+        log_info "stopping $(basename "$(dirname "$pidfile")") (pid $pid)"
         kill "$pid"
         for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
         kill -9 "$pid" 2>/dev/null || true
     fi
-    rm -f "$LAB/qemu.pid"
-fi
+    rm -f "$pidfile"
+done
 
 if [[ $RESET -eq 1 ]]; then
     log_info "resetting lab '$NAME' to pristine"
-    rm -f "$LAB"/system.qcow2 "$LAB"/disk*.raw "$LAB"/lab.env "$LAB"/console.log
+    rm -f "$LAB"/node*/system.qcow2 "$LAB"/node*/disk*.raw "$LAB"/node*/console.log
+    rm -f "$LAB"/system.qcow2 "$LAB"/disk*.raw "$LAB"/console.log
+    rm -f "$LAB"/lab.env "$LAB"/plan.env
 fi

@@ -46,6 +46,7 @@ CROSS=0
 KEEP=0
 PHASE=all
 ONLY=""
+NODES="${LAB_NODES:-1}"
 PYTEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -54,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --profile-dir) PROFILE_DIRS+=("$2");   shift 2 ;;
         --cross)       CROSS=1;                shift ;;
         --keep)        KEEP=1;                 shift ;;
+        --nodes)       NODES="$2";             shift 2 ;;
         --phase)       PHASE="$2";             shift 2 ;;
         --only)        ONLY="$2";              shift 2 ;;
         --)            shift; PYTEST_ARGS=("$@"); break ;;
@@ -141,9 +143,15 @@ done
 # ── Lab ──────────────────────────────────────────────────────────────────────
 
 if [[ $run_prepare -eq 1 ]]; then
-    if [[ ! -f "$LAB/qemu.pid" ]] || ! kill -0 "$(cat "$LAB/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-        log_info "no lab running; starting one ($total_disks test disks)"
-        "$ROOT/lab/up.sh" --name "$NAME" --variant "$VARIANT" --disks "$total_disks" >&2
+    # node1's pidfile: a multi-node lab keeps each node in its own directory,
+    # and checking the old single-node path made this think the lab was always
+    # down and start it again on every phase.
+    node1_pid="$LAB/node1/qemu.pid"
+    [[ -f "$node1_pid" ]] || node1_pid="$LAB/qemu.pid"
+    if [[ ! -f "$node1_pid" ]] || ! kill -0 "$(cat "$node1_pid" 2>/dev/null)" 2>/dev/null; then
+        log_info "no lab running; starting one ($total_disks test disks, $NODES node(s))"
+        "$ROOT/lab/up.sh" --name "$NAME" --variant "$VARIANT" \
+            --disks "$total_disks" --nodes "$NODES" >&2
     fi
 fi
 [[ -f "$LAB/lab.env" ]] || die "lab '$NAME' is not up"
@@ -156,19 +164,31 @@ mapfile -t SSH_OPTS < <(node_ssh_opts)
 # through `bash -s`: a remote script read from stdin shares that stdin with
 # every command it runs, so one command that reads stdin silently swallows the
 # rest of the script and the step "succeeds" having done half its work.
-node_ssh() {
-    ssh -n "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$NODE_SSH_PORT" root@127.0.0.1 "$@"
+NODE_COUNT="${LAB_NODE_COUNT:-1}"
+node_port() {
+    local var="NODE${1}_SSH_PORT"
+    echo "${!var:-$NODE_SSH_PORT}"
 }
-node_push() {
-    tar cz -C "$1" . | ssh "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$NODE_SSH_PORT" \
-        root@127.0.0.1 "mkdir -p $2 && tar xz -C $2"
+# The *_at helpers take a node index. The plain ones mean node 1, which is
+# where the suite runs and where anything cluster-wide only needs doing once.
+node_ssh_at() {
+    local i="$1"; shift
+    ssh -n "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$(node_port "$i")" root@127.0.0.1 "$@"
 }
-node_run_script() {
-    local script="$1"; shift
-    ssh "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$NODE_SSH_PORT" root@127.0.0.1 \
+node_push_at() {
+    local i="$1"
+    tar cz -C "$2" . | ssh "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$(node_port "$i")" \
+        root@127.0.0.1 "mkdir -p $3 && tar xz -C $3"
+}
+node_run_script_at() {
+    local i="$1" script="$2"; shift 2
+    ssh "${SSH_OPTS[@]}" -i "$NODE_SSH_KEY" -p "$(node_port "$i")" root@127.0.0.1 \
         "cat > /root/.lab-step.sh" < "$script"
-    node_ssh "bash /root/.lab-step.sh $*"
+    node_ssh_at "$i" "bash /root/.lab-step.sh $*"
 }
+node_ssh()        { node_ssh_at 1 "$@"; }
+node_push()       { node_push_at 1 "$@"; }
+node_run_script() { node_run_script_at 1 "$@"; }
 
 # ── Ship everything ──────────────────────────────────────────────────────────
 
@@ -179,8 +199,12 @@ node_push "$ROOT/suite" /root/lab-suite
 
 for i in "${!P_DIR[@]}"; do
     pname="${P_NAME[$i]}"
-    node_ssh "rm -rf /root/lab-profile-$pname && mkdir -p /root/lab-profile-$pname"
-    node_push "${P_DIR[$i]}" "/root/lab-profile-$pname"
+    # Every node: a local storage needs its own filesystem on each, and the
+    # profile's own guard keeps the cluster-wide `pvesm add` from running twice.
+    for ((n = 1; n <= NODE_COUNT; n++)); do
+        node_ssh_at "$n" "rm -rf /root/lab-profile-$pname && mkdir -p /root/lab-profile-$pname"
+        node_push_at "$n" "${P_DIR[$i]}" "/root/lab-profile-$pname"
+    done
     if [[ -n "${P_TESTS[$i]}" ]]; then
         log_info "adding $pname tests from ${P_TESTS[$i]}"
         node_ssh "mkdir -p /root/lab-tests-$pname"
@@ -230,10 +254,13 @@ echo "--- $pname ---"
 grep -v '^#' "\$LAB_TEST_CONFIG" | grep . || true
 touch /root/.lab-profile-applied-$pname
 REMOTE
-    node_run_script "$STEP"
+    for ((n = 1; n <= NODE_COUNT; n++)); do
+        [[ $NODE_COUNT -gt 1 ]] && log_info "  node$n"
+        node_run_script_at "$n" "$STEP"
+        node_ssh_at "$n" "test -f /root/.lab-profile-applied-$pname" \
+            || die "storage profile '$pname' did not apply cleanly on node$n"
+    done
     rm -f "$STEP"
-    node_ssh "test -f /root/.lab-profile-applied-$pname" \
-        || die "storage profile '$pname' did not apply cleanly"
 
     STORAGES+=("$(node_ssh "sed -n 's/^STORAGE_NAME=//p' /root/lab-test-$pname.env | tail -1")")
 done
@@ -287,6 +314,14 @@ REMOTE
 }
 
 if [[ $run_suites -eq 1 ]]; then
+    # Re-ship the suite even when prepare is not running. Without this a phase
+    # invocation tests whatever the node happened to have, which silently hides
+    # every change made since the lab came up.
+    if [[ $run_prepare -eq 0 ]]; then
+        log_info "refreshing the suite on the node"
+        node_ssh "rm -rf /root/lab-suite && mkdir -p /root/lab-suite"
+        node_push "$ROOT/suite" /root/lab-suite
+    fi
     for i in "${!P_DIR[@]}"; do
         pname="${P_NAME[$i]}"
         # --only picks one suite out of the plan, so CI can give each storage
