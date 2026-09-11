@@ -1,0 +1,71 @@
+"""PVE API access for tests running on the node itself.
+
+Goes through `pvesh` rather than an HTTP client on purpose. The suite always
+runs as root on the node under test, so pvesh needs no credentials, no TLS
+handling and no session that can go stale mid-run - which removes the whole
+reconnect-on-broken-pipe dance an HTTP client needs for session-scoped
+fixtures. The cost is a fork per call; at a few hundred calls per run that is
+not worth optimising away.
+"""
+
+import json
+import subprocess
+
+
+class PVEError(RuntimeError):
+    """A pvesh call failed. `stderr` carries what PVE actually said, which is
+    what a test asserting on a *rejection* wants to match against."""
+
+    def __init__(self, args, returncode, stderr):
+        self.returncode = returncode
+        self.stderr = stderr.strip()
+        super().__init__(f"pvesh {' '.join(args)} failed ({returncode}): {self.stderr}")
+
+
+class PVE:
+    """Thin pvesh wrapper. Paths are API paths: '/nodes/pve-lab/qemu'."""
+
+    def _run(self, verb: str, path: str, params: dict | None = None,
+             timeout: int = 120):
+        args = [verb, path, "--output-format", "json"]
+        for key, value in (params or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                value = 1 if value else 0
+            args += [f"--{key}", str(value)]
+
+        proc = subprocess.run(["pvesh", *args], capture_output=True, text=True,
+                              timeout=timeout)
+        if proc.returncode != 0:
+            raise PVEError(args, proc.returncode, proc.stderr)
+
+        out = proc.stdout.strip()
+        if not out:
+            return None
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            # Some endpoints print a bare UPID rather than JSON.
+            return out
+
+    def get(self, path, **params):    return self._run("get", path, params)
+    def create(self, path, **params): return self._run("create", path, params)
+    def set(self, path, **params):    return self._run("set", path, params)
+    def delete(self, path, **params): return self._run("delete", path, params)
+
+    # ── Convenience ──────────────────────────────────────────────────────────
+
+    def node(self) -> str:
+        """The single node this lab runs. Multi-node is out of scope: the
+        storage backends this suite targets are local, so a second node adds
+        a data copy and little coverage."""
+        return self.get("/nodes")[0]["node"]
+
+    def nextid(self) -> int:
+        return int(self.get("/cluster/nextid"))
+
+    def storage_content(self, storage: str, content: str | None = None) -> list:
+        node = self.node()
+        params = {"content": content} if content else {}
+        return self.get(f"/nodes/{node}/storage/{storage}/content", **params) or []
