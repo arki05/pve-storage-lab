@@ -26,6 +26,7 @@ from labkit import cluster          # noqa: E402
 from labkit import images           # noqa: E402
 from labkit import lab as lab_mod   # noqa: E402
 from labkit import nodes as ident   # noqa: E402
+from labkit import run as run_mod   # noqa: E402
 from labkit import state            # noqa: E402
 from labkit.qemu import Machine     # noqa: E402
 
@@ -57,6 +58,31 @@ def cmd_ssh(args) -> int:
             "-i", env["NODE_SSH_KEY"], "-p", str(port), "root@127.0.0.1"]
     command = [a for a in args.command if a != "--"]
     os.execvp("ssh", argv + command)
+
+
+def cmd_run(args) -> int:
+    phases = {"all", "prepare", "suite", "report", "teardown"}
+    if args.phase not in phases:
+        print(f"unknown phase: {args.phase} ({', '.join(sorted(phases))})",
+              file=sys.stderr)
+        return 2
+
+    if args.phase in ("all", "prepare"):
+        if not args.profile_dir:
+            print("at least one --profile-dir is required", file=sys.stderr)
+            return 2
+        run_mod.prepare(args.profile_dir, name=args.name, nodes=args.nodes,
+                        cross=args.cross, disk_size=args.disk_size,
+                        mem=args.mem, cpus=args.cpus)
+    status = 0
+    if args.phase in ("all", "suite"):
+        status = run_mod.run_suites(args.name, only=args.only,
+                                    pytest_args=args.pytest_args)
+    if args.phase in ("all", "teardown") and not args.keep:
+        run_mod.teardown(args.name)
+    if args.phase in ("all", "report"):
+        return run_mod.report(args.name)
+    return status
 
 
 def cmd_node_image(args) -> int:
@@ -123,6 +149,24 @@ def main() -> int:
     ni.add_argument("--variant", default="base")
     ni.add_argument("--force", action="store_true")
     ni.set_defaults(func=cmd_node_image)
+
+    rn = sub.add_parser("run", help="run the suite against a lab")
+    rn.add_argument("--name", default="lab")
+    rn.add_argument("--profile-dir", action="append", default=[],
+                    help="repeatable; a profile directory")
+    rn.add_argument("--nodes", type=int, default=1)
+    rn.add_argument("--cross", action="store_true",
+                    help="also run the pairwise cross-storage round trips")
+    rn.add_argument("--phase", default="all",
+                    help="all, prepare, suite, report or teardown")
+    rn.add_argument("--only", help="run just this storage's suite, or 'cross'")
+    rn.add_argument("--keep", action="store_true", help="skip teardown")
+    rn.add_argument("--disk-size", default="8G")
+    rn.add_argument("--mem", type=int, default=6144)
+    rn.add_argument("--cpus", type=int, default=4)
+    rn.add_argument("pytest_args", nargs="*",
+                    help="extra pytest arguments, after --")
+    rn.set_defaults(func=cmd_run)
 
     st = sub.add_parser("status", help="what is running")
     st.add_argument("--name", default="lab")
