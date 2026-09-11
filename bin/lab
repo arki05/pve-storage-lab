@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from labkit import cluster          # noqa: E402
 from labkit import images           # noqa: E402
 from labkit import lab as lab_mod   # noqa: E402
 from labkit import nodes as ident   # noqa: E402
@@ -37,8 +38,7 @@ def cmd_up(args) -> int:
         ensure_image=lambda index, variant: images.node_image(index, variant),
     )
     if args.nodes > 1:
-        subprocess.run(["bash", str(ROOT / "lab" / "cluster.sh"),
-                        "--name", args.name], check=True)
+        cluster.form(args.name, args.nodes)
     for key, value in env.items():
         print(f"{key}={value}")
     return 0
