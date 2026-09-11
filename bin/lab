@@ -22,22 +22,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from labkit import images           # noqa: E402
 from labkit import lab as lab_mod   # noqa: E402
 from labkit import nodes as ident   # noqa: E402
 from labkit import state            # noqa: E402
 from labkit.qemu import Machine     # noqa: E402
-
-
-def _shell_node_image(index: int, variant: str) -> None:
-    """Build a node image with the shell builder.
-
-    Still shell while the port is in progress. The Python side calls it the
-    way a user would, so replacing it later changes nothing here.
-    """
-    subprocess.run(
-        ["bash", str(ROOT / "lab" / "node-image.sh"),
-         "--node", str(index), "--variant", variant],
-        check=True)
 
 
 def cmd_up(args) -> int:
@@ -45,7 +34,7 @@ def cmd_up(args) -> int:
         name=args.name, count=args.nodes, disks=args.disks,
         disk_size=args.disk_size, mem=args.mem, cpus=args.cpus,
         variant=args.variant, reuse=args.reuse, fresh=args.fresh,
-        ensure_image=_shell_node_image,
+        ensure_image=lambda index, variant: images.node_image(index, variant),
     )
     if args.nodes > 1:
         subprocess.run(["bash", str(ROOT / "lab" / "cluster.sh"),
@@ -68,6 +57,11 @@ def cmd_ssh(args) -> int:
             "-i", env["NODE_SSH_KEY"], "-p", str(port), "root@127.0.0.1"]
     command = [a for a in args.command if a != "--"]
     os.execvp("ssh", argv + command)
+
+
+def cmd_node_image(args) -> int:
+    images.node_image(args.node, args.variant, force=args.force)
+    return 0
 
 
 def cmd_status(args) -> int:
@@ -123,6 +117,12 @@ def main() -> int:
     sh.add_argument("--node", type=int, default=1)
     sh.add_argument("command", nargs=argparse.REMAINDER)
     sh.set_defaults(func=cmd_ssh)
+
+    ni = sub.add_parser("node-image", help="build one node's image")
+    ni.add_argument("--node", type=int, required=True)
+    ni.add_argument("--variant", default="base")
+    ni.add_argument("--force", action="store_true")
+    ni.set_defaults(func=cmd_node_image)
 
     st = sub.add_parser("status", help="what is running")
     st.add_argument("--name", default="lab")
