@@ -1,0 +1,35 @@
+# What this backend cannot do.
+#
+# These are limitations, not defects: every test runs against every backend,
+# and the ones a backend genuinely cannot satisfy are declared here rather than
+# skipped. A skip would mean the test never ran and nothing said so - which is
+# how linked clones went untested on bcachefs for a whole day.
+#
+# Declared by capability marker rather than by test name, because names drift
+# and capabilities do not. If one of these starts passing it is reported as a
+# stale expectation, which is a finding: the backend gained something, or the
+# declaration was wrong to begin with.
+
+[[expected]]
+profile = "dir"
+marker = "snapshots"
+kind = "limitation"
+reason = "this storage has no snapshots"
+
+[[expected]]
+profile = "dir"
+marker = "linked_clone"
+kind = "limitation"
+reason = "clones are full copies here"
+
+[[expected]]
+profile = "dir"
+marker = "rollback_past_newer"
+kind = "limitation"
+reason = "rollback is only possible to the most recent snapshot; going further would mean destroying the ones in between, which this backend refuses to do silently"
+
+[[expected]]
+profile = "dir"
+marker = "vmstate"
+kind = "limitation"
+reason = "this storage cannot hold VM state volumes"

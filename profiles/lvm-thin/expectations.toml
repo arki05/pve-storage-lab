@@ -1,0 +1,17 @@
+# What this backend cannot do.
+#
+# These are limitations, not defects: every test runs against every backend,
+# and the ones a backend genuinely cannot satisfy are declared here rather than
+# skipped. A skip would mean the test never ran and nothing said so - which is
+# how linked clones went untested on bcachefs for a whole day.
+#
+# Declared by capability marker rather than by test name, because names drift
+# and capabilities do not. If one of these starts passing it is reported as a
+# stale expectation, which is a finding: the backend gained something, or the
+# declaration was wrong to begin with.
+
+[[expected]]
+profile = "lvm-thin"
+marker = "linked_clone"
+kind = "limitation"
+reason = "clones are full copies here"

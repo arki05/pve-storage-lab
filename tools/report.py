@@ -38,11 +38,18 @@ def load_expectations(paths: list[Path]) -> list[dict]:
     return entries
 
 
-def matches(entry: dict, label: str, test_id: str) -> bool:
+def matches(entry: dict, label: str, test_id: str, markers: set[str]) -> bool:
     scope = entry.get("profile") or entry.get("pair")
     if scope and scope != label:
         return False
-    return fnmatch.fnmatch(test_id, entry.get("test", "*"))
+    # A capability marker is the durable way to declare a limitation: test
+    # names drift when they are renamed or split, capabilities do not.
+    wanted = entry.get("marker")
+    if wanted and wanted not in markers:
+        return False
+    if "test" in entry and not fnmatch.fnmatch(test_id, entry["test"]):
+        return False
+    return bool(wanted) or "test" in entry
 
 
 def parse_junit(path: Path) -> tuple[str, list[dict]]:
@@ -55,13 +62,19 @@ def parse_junit(path: Path) -> tuple[str, list[dict]]:
         test_id = f"{classname}::{name}" if classname else name
         outcome = "passed"
         message = ""
+        markers: set[str] = set()
         for child in case:
             if child.tag in ("failure", "error"):
                 outcome = child.tag
                 message = (child.get("message") or "").strip()
             elif child.tag == "skipped":
                 outcome = "skipped"
-        results.append({"id": test_id, "outcome": outcome, "message": message})
+            elif child.tag == "properties":
+                for prop in child:
+                    if prop.get("name") == "markers":
+                        markers = set((prop.get("value") or "").split(","))
+        results.append({"id": test_id, "outcome": outcome, "message": message,
+                        "markers": markers})
     return label, results
 
 
@@ -83,7 +96,8 @@ def main(argv: list[str]) -> int:
         label, results = parse_junit(junit)
         for result in results:
             entry = next((e for e in expectations
-                          if matches(e, label, result["id"])), None)
+                          if matches(e, label, result["id"],
+                                     result.get("markers", set()))), None)
             if result["outcome"] == "skipped":
                 totals["skipped"] += 1
                 continue

@@ -40,63 +40,73 @@ CONFIG = _load_config()
 def pytest_configure(config):
     # The parameter has to be called `config`: pluggy matches hook arguments by
     # name, and anything else fails validation at collection time.
-    config.addinivalue_line(
-        "markers",
-        "crossstorage: moves volumes between two storages; needs several "
-        "profiles and is selected with -m crossstorage",
-    )
+    for marker, description in CAPABILITY_MARKERS.items():
+        config.addinivalue_line("markers", f"{marker}: {description}")
 
 
 def cap(name: str) -> bool:
+    """What a profile claims. Read for reporting, not for skipping."""
     return CONFIG.get(name, "false").strip().lower() in ("1", "true", "yes")
 
 
-needs_snapshots = pytest.mark.skipif(
-    not cap("SUPPORTS_SNAPSHOTS"), reason="storage does not support snapshots")
-needs_linked_clone = pytest.mark.skipif(
-    not cap("SUPPORTS_LINKED_CLONE"), reason="storage does not support linked clones")
-needs_backup = pytest.mark.skipif(
-    not cap("SUPPORTS_BACKUP"), reason="storage does not support backups")
-needs_lxc = pytest.mark.skipif(
-    not cap("SUPPORTS_LXC"), reason="storage does not support containers")
-needs_images = pytest.mark.skipif(
-    not cap("SUPPORTS_IMAGES"), reason="storage does not support VM images")
-# Not every backend expresses a volume's size as a filesystem the guest can
-# see. A quota-backed container rootfs is a directory on a much larger
-# filesystem: the limit is real and enforced, but `df` inside the guest reports
-# the whole filesystem, so a resize is invisible from in there.
-# Size enforcement is universal, not a bcachefs concern: lvm-thin enforces with
-# the LV size, ZFS with a refquota, a directory storage with the size of the raw
-# image, bcachefs with a project quota. A backend that hands out a volume whose
-# stated size is not a limit is a backend that will silently fill its pool.
-needs_size_enforcement = pytest.mark.skipif(
-    not cap("ENFORCES_VOLUME_SIZE"),
-    reason="storage does not enforce volume sizes")
-# A RAM snapshot writes the guest's memory to a storage as one large
-# sequential volume - a different workload from anything else here, and a
-# different guarantee: rollback has to restore a *running process*, not just a
-# disk. `vmstatestorage` is what makes it a storage test: without it PVE picks
-# a storage of its own and the backend under test is never exercised.
-# ZFS can only roll back to the *most recent* snapshot: going further back
-# means destroying the ones in between, and it refuses rather than doing that
-# silently. btrfs and bcachefs will roll back to any snapshot and keep the
-# newer ones. Neither is wrong, and the difference is worth recording rather
-# than papering over - a backup strategy built on "roll back to last Tuesday"
-# works on one and not the other.
-needs_rollback_past_newer = pytest.mark.skipif(
-    not cap("ROLLBACK_PAST_NEWER_SNAPSHOTS"),
-    reason="storage cannot roll back past a newer snapshot")
-needs_vmstate = pytest.mark.skipif(
-    not cap("SUPPORTS_VMSTATE"),
-    reason="storage does not hold VM state volumes")
-needs_tpm = pytest.mark.skipif(
-    not cap("SUPPORTS_TPM"), reason="storage does not support TPM state volumes")
-needs_guest_visible_size = pytest.mark.skipif(
-    not cap("RESIZE_VISIBLE_IN_GUEST"),
-    reason="volume size is not visible to the guest on this backend")
+# Capabilities are *tags*, not gates.
+#
+# They used to be skipif conditions, and that had a failure mode worse than any
+# bug they hid: a capability wrongly declared false meant the tests for it were
+# never run, and nothing said so. Linked clones went untested on bcachefs for
+# exactly that reason - the plugin supported them all along.
+#
+# So every test runs against every backend. A backend that genuinely cannot do
+# something declares it in expectations.toml, where the failure is reported and
+# does not block - and where a declaration that stops being true is flagged
+# loudly. "We expected this to fail and it passed" is a finding worth having,
+# and a skip can never produce one.
+#
+# Tags remain useful for selection: `-m "not vmstate"` skips the slow ones
+# deliberately, which is a choice rather than an accident.
+needs_snapshots = pytest.mark.snapshots
+needs_linked_clone = pytest.mark.linked_clone
+needs_backup = pytest.mark.backup
+needs_lxc = pytest.mark.lxc
+needs_images = pytest.mark.images
+needs_size_enforcement = pytest.mark.size_enforcement
+needs_rollback_past_newer = pytest.mark.rollback_past_newer
+needs_vmstate = pytest.mark.vmstate
+needs_tpm = pytest.mark.tpm
+needs_guest_visible_vm_size = pytest.mark.vm_resize_visible
+needs_guest_visible_ct_size = pytest.mark.ct_resize_visible
+
+CAPABILITY_MARKERS = {
+    "snapshots": "takes and rolls back snapshots",
+    "linked_clone": "clones that share the base rather than copying it",
+    "backup": "vzdump and restore",
+    "lxc": "container volumes",
+    "images": "VM disk images",
+    "size_enforcement": "a volume's stated size is a limit",
+    "rollback_past_newer": "rolling back past a newer snapshot, keeping it",
+    "vmstate": "snapshots that include guest memory",
+    "tpm": "TPM state volumes",
+    "vm_resize_visible": "a VM disk resize is visible inside the guest",
+    "ct_resize_visible": "a container rootfs resize is visible inside it",
+    "crossstorage": "moves volumes between two storages",
+}
 
 
 # ── Session fixtures ─────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _record_markers(request, record_property):
+    """Put each test's markers into the junit output.
+
+    Expectations then declare a limitation by capability - `marker =
+    "vmstate"` - rather than by matching test names, which drift the moment a
+    test is renamed or split.
+    """
+    names = sorted(m.name for m in request.node.iter_markers()
+                   if m.name in CAPABILITY_MARKERS)
+    if names:
+        record_property("markers", ",".join(names))
 
 
 @pytest.fixture(scope="session")
