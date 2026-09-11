@@ -9,6 +9,7 @@ import pytest
 
 from conftest import needs_lxc, needs_images
 from helpers.data_guard import DataGuard
+from helpers.payloads import PATTERNS
 from helpers.volumes import assert_relocated
 from helpers.wait import wait_for_task
 
@@ -31,11 +32,12 @@ def _move_target(pve, node):
 
 @needs_images
 class TestVMMove:
-    def test_move_disk_off_and_back(self, create_vm, pve, node, storage):
+    @pytest.mark.parametrize("pattern", PATTERNS)
+    def test_move_disk_off_and_back(self, create_vm, pve, node, storage, pattern):
         vm = create_vm()
         vm.start()
         vm.wait_agent()
-        guard = DataGuard(vm.agent()).seed()
+        guard = DataGuard(vm.agent()).seed(pattern=pattern)
         vm.shutdown()
 
         wait_for_task(pve, pve.create(
@@ -53,13 +55,15 @@ class TestVMMove:
         vm.start()
         vm.wait_agent()
         guard.verify("after a move round trip")
+        guard.verify_sparse("after a move round trip")
 
 
 @needs_lxc
 class TestCTMove:
-    def test_move_volume_off_and_back(self, create_ct, pve, node, storage):
+    @pytest.mark.parametrize("pattern", PATTERNS)
+    def test_move_volume_off_and_back(self, create_ct, pve, node, storage, pattern):
         ct = create_ct(start=True)
-        guard = DataGuard(ct.exec()).seed()
+        guard = DataGuard(ct.exec()).seed(pattern=pattern)
         ct.stop()
 
         wait_for_task(pve, pve.create(
@@ -77,3 +81,4 @@ class TestCTMove:
         ct.start()
         guard.guest = ct.exec()
         guard.verify("after a move round trip")
+        guard.verify_sparse("after a move round trip")

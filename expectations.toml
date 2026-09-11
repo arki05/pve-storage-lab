@@ -1,0 +1,27 @@
+# Results that are known, and what kind of known they are.
+#
+# Three kinds, deliberately distinguished:
+#
+#   known-bug   A real defect, ours or upstream's, tolerated while it is
+#               tracked. Reported, does not block. If it starts passing it is
+#               flagged as stale so the entry - and whatever workaround goes
+#               with it - can be removed.
+#
+#   sanctioned  Not a defect. A documented consequence of how two backends
+#               differ, which will never be "fixed". Prefer recording these as
+#               facts in a characterisation test rather than as a suppressed
+#               failure; an entry here is a last resort for when the difference
+#               only shows up as a failing assertion.
+#
+# Anything not listed here that fails is a real failure and blocks.
+#
+# `test` is a glob matched against "<file>::<class>::<name>". `profile` scopes
+# an entry to one storage; `pair` scopes it to one cross-storage direction.
+# Both are optional - an entry with neither applies everywhere.
+#
+# A plugin repository can ship its own expectations.toml next to profile.env;
+# the lab merges it with this one, so a plugin's known bugs live with the
+# plugin rather than here.
+
+# No lab-wide expectations at present. Plugin-specific ones live with the
+# plugin, next to its profile.env.

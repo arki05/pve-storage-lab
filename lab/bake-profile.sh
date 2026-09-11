@@ -24,6 +24,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 
 PVE_VERSION="${PVE_VERSION:-9.2-1}"
 PROFILE_DIR=""
+BASE_VARIANT="base"
+OUT_VARIANT=""
 FORCE=0
 MEM="${BAKE_MEM:-6144}"
 CPUS="${BAKE_CPUS:-4}"
@@ -33,8 +35,10 @@ MAC="${LAB_MAC:-52:54:00:1a:b0:01}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --profile-dir) PROFILE_DIR="$2"; shift 2 ;;
-        --force)       FORCE=1;          shift ;;
+        --profile-dir) PROFILE_DIR="$2";   shift 2 ;;
+        --base)        BASE_VARIANT="$2"; shift 2 ;;
+        --variant)     OUT_VARIANT="$2";  shift 2 ;;
+        --force)       FORCE=1;            shift ;;
         -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
         *)             die "unknown argument: $1" ;;
     esac
@@ -42,19 +46,20 @@ done
 
 [[ -n "$PROFILE_DIR" ]] || die "--profile-dir is required"
 PROFILE_DIR="$(cd "$PROFILE_DIR" && pwd)"
-if [[ -f "$PROFILE_DIR/name" ]]; then
-    PROFILE="$(tr -d '[:space:]' < "$PROFILE_DIR/name")"
-else
-    PROFILE="$(basename "$PROFILE_DIR")"
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/profile.sh"
+PROFILE="$(profile_name "$PROFILE_DIR")"
+[[ -n "$OUT_VARIANT" ]] || OUT_VARIANT="$PROFILE"
 
 STATE="$(lab_state_dir)"
-BASE="$STATE/images/pve-${PVE_VERSION}-base.qcow2"
-DERIVED="$STATE/images/pve-${PVE_VERSION}-${PROFILE}.qcow2"
+# Bakes chain: a second profile with expensive setup builds on the first one's
+# result rather than on the base, so a lab with two such profiles pays for each
+# once instead of on every run.
+BASE="$STATE/images/pve-${PVE_VERSION}-${BASE_VARIANT}.qcow2"
+DERIVED="$STATE/images/pve-${PVE_VERSION}-${OUT_VARIANT}.qcow2"
 SSH_KEY="$STATE/id_ed25519"
-WORK="$STATE/bake/$PROFILE"
+WORK="$STATE/bake/$OUT_VARIANT"
 
-[[ -f "$BASE" ]] || die "base image missing: $BASE (run lab/build-image.sh first)"
+[[ -f "$BASE" ]] || die "image missing: $BASE (run lab/build-image.sh first)"
 
 if [[ ! -f "$PROFILE_DIR/bake.sh" ]]; then
     log_info "profile '$PROFILE' has no bake.sh; nothing to pre-build"
@@ -69,7 +74,7 @@ mkdir -p "$WORK"
 rm -f "$WORK/node.qcow2"
 qemu-img create -f qcow2 -b "$BASE" -F qcow2 "$WORK/node.qcow2" >/dev/null
 
-log_info "booting the base image to bake profile '$PROFILE'"
+log_info "baking profile '$PROFILE' onto ${BASE_VARIANT}"
 qemu-system-x86_64 \
     -enable-kvm -cpu host -machine q35 -smp "$CPUS" -m "$MEM" \
     -drive file="$WORK/node.qcow2",if=none,id=sys,format=qcow2,cache=unsafe \

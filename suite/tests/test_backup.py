@@ -2,8 +2,11 @@
 
 import time
 
+import pytest
+
 from conftest import needs_backup, needs_lxc, needs_images, needs_snapshots, LabVM, LabCT
 from helpers.data_guard import DataGuard
+from helpers.payloads import PATTERNS
 from helpers.wait import wait_for_task
 
 pytestmark = needs_backup
@@ -66,9 +69,13 @@ class TestVMBackup:
 
 @needs_lxc
 class TestCTBackup:
-    def test_backup_restore_roundtrip(self, create_ct, pve, node, storage):
+    @pytest.mark.parametrize("pattern", PATTERNS)
+    def test_backup_restore_roundtrip(self, create_ct, pve, node, storage, pattern):
+        """Across every payload shape: a backup that restores with the right
+        checksums but writes a sparse image out solid no longer fits the
+        volume it came from."""
         ct = create_ct(start=True)
-        guard = DataGuard(ct.exec()).seed()
+        guard = DataGuard(ct.exec()).seed(pattern=pattern)
         ct.stop()
 
         wait_for_task(pve, pve.create(
@@ -87,6 +94,7 @@ class TestCTBackup:
             restored.start()
             guard.guest = restored.exec()
             guard.verify("after restore")
+            guard.verify_sparse("after restore")
         finally:
             restored.destroy()
 

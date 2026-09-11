@@ -63,16 +63,47 @@ them as `/dev/disk/by-id/virtio-labdiskN` rather than guessing at `vdb`. Ask
 for as many as the backend needs — multi-device behaviour (replication,
 targets, erasure coding) is not testable on one disk.
 
+## Testing several storages at once
+
+```bash
+bash run.sh --profile-dir ./profiles/zfs \
+            --profile-dir ./profiles/btrfs \
+            --profile-dir ./profiles/lvm-thin --cross
+```
+
+The suite runs **once per storage**, each with its own capabilities — proving
+one backend works says nothing about the others. `--cross` adds the pairwise
+tests: move a volume from every storage to every other and back, and check the
+data is unchanged.
+
 ## Writing a profile
 
 A profile is a directory:
 
 ```
 profiles/<name>/
+├── profile.env       # NAME, DISKS, optional TESTS / SOURCE
 ├── setup.sh          # runs on the node as root; registers the storage
 ├── capabilities.env  # what the storage supports; drives the skip logic
+├── bake.sh           # optional: expensive setup, baked into an image once
+├── expectations.toml # optional: this backend's known results
 └── teardown.sh       # optional
 ```
+
+`profile.env` makes a profile self-describing, so `--profile-dir` is the only
+thing a caller passes:
+
+```
+NAME=bcachefs
+DISKS=4              # lab test disks wanted; the lab assigns a disjoint range
+TESTS=../tests       # extra pytest files, relative to the profile dir
+SOURCE=../..         # a working tree to build and install, instead of a release
+```
+
+**Profiles must not go looking for disks.** The assigned devices arrive in
+`$LAB_DISKS`; globbing for `virtio-labdisk1` works only while exactly one
+profile exists, and silently steals another storage's disk the moment one
+doesn't.
 
 `setup.sh` must append `STORAGE_NAME=` to `$LAB_TEST_CONFIG`. Everything else
 is discovered. `capabilities.env` decides which tests apply:
@@ -98,6 +129,62 @@ bash run.sh --profile-dir ../pve-bcachefs/test/profile \
 profile can build and install the thing under test rather than pulling its last
 release. Without it the lab tests whatever was published — which is precisely
 the code you are not trying to find bugs in.
+
+## Expected results
+
+"Did the suite pass" is the wrong question once a backend has known defects: a
+suite that is always red tells you nothing the day something new breaks. So the
+exit status is driven by *unexpected* failures.
+
+`expectations.toml` — in this repo, and optionally one per profile, merged —
+declares results that are already known:
+
+```toml
+[[expected]]
+profile = "bcachefs"
+test = "*test_rsync_with_xattrs_off_the_volume*"
+kind = "known-bug"
+reason = "..."
+```
+
+Three buckets come out, and the third is the one that matters:
+
+| | |
+|---|---|
+| **failures** | not declared. These block |
+| **expected failures** | declared and failed. Reported, do not block |
+| **stale expectations** | declared and **passed**. Surfaced loudly, and they block too |
+
+Without stale detection the file rots into a permanent mute button, and a fix
+nobody noticed keeps its workaround forever. An expectation that no longer
+holds is a claim about the system that has quietly become false, which is
+exactly what the file exists to prevent.
+
+`kind` distinguishes a **known-bug** — real, tracked, tolerated for now — from
+a **sanctioned** difference, which is not a defect and will never be fixed.
+Prefer recording sanctioned differences as facts rather than as suppressed
+failures.
+
+## Payload shape is a test dimension
+
+Moves, backups and integrity checks run against three fill patterns, because
+several classes of bug appear for only one shape:
+
+| | |
+|---|---|
+| `random` | incompressible — the only honest way to test a size limit |
+| `compressible` | a short random line repeated, so logical and physical size diverge sharply |
+| `sparse` | real holes, checked for inflation after a copy |
+
+The period of the compressible pattern is deliberately far below the
+compression block size. Repeating a 1 MiB random block looks compressible to a
+human and is incompressible to lz4 — ZFS compresses per 128 KiB record, and
+inside any one record that data is still random.
+
+This matters more than it sounds. A `/dev/zero` fill tests nothing on a
+compressing backend: ZFS elides all-zero blocks into holes, so a 1 GiB volume
+happily swallows many gigabytes and a "quota not enforced" failure is really
+measuring the compressor.
 
 ## The suite
 

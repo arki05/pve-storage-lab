@@ -17,10 +17,15 @@ from helpers.wait import wait_for_task
 
 pytestmark = needs_size_enforcement
 
-# Comfortably past the volume size, written in chunks so the limit is hit as a
-# write error rather than one allocation the backend might reject up front.
+# Incompressible data, deliberately. Filling with /dev/zero tests nothing on a
+# backend that compresses: ZFS with lz4 shrinks 2.5 GiB of zeros to almost
+# nothing and the refquota is never reached, so the test "fails" while the
+# storage is behaving perfectly. Only random data measures a size limit.
+#
+# Written in chunks so the limit arrives as a write error rather than as one
+# large allocation the backend might reject up front.
 FILL = ("for i in $(seq 1 {chunks}); do "
-        "  dd if=/dev/zero of={path}/fill-$i bs=1M count=64 conv=fsync "
+        "  dd if=/dev/urandom of={path}/fill-$i bs=1M count=64 conv=fsync "
         "    status=none || exit 42; "
         "done")
 
