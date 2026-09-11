@@ -11,7 +11,8 @@ up. It deserves a test at this level rather than in any one plugin's suite.
 
 import pytest
 
-from conftest import needs_lxc, needs_images, needs_size_enforcement
+from conftest import (needs_lxc, needs_images, needs_size_enforcement,
+                      needs_snapshots)
 from helpers.wait import wait_for_task
 
 pytestmark = needs_size_enforcement
@@ -45,13 +46,11 @@ class TestContainerSizeEnforcement:
             "the size limit was not enforced after a restart"
         )
 
-    def test_enforcement_survives_a_snapshot_rollback(self, create_ct, pve, node,
-                                                      capabilities):
+    @needs_snapshots
+    def test_enforcement_survives_a_snapshot_rollback(self, create_ct, pve, node):
         """Rollback can leave the volume in a different internal state than it
         was created in - on some backends a snapshot rather than a master
         volume - and enforcement can be skipped in that state."""
-        if not capabilities["snapshots"]:
-            pytest.skip("storage does not support snapshots")
         ct = create_ct(start=True, disk_gb=1)
         wait_for_task(pve, pve.create(f"/nodes/{node}/lxc/{ct.vmid}/snapshot",
                                       snapname="sized"), 300)
