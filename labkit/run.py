@@ -106,7 +106,12 @@ def prepare(profile_dirs: list[str], name: str = "lab", nodes: int = 1,
 
         if profile.tests:
             log.info("adding %s tests from %s", profile.name, profile.tests)
-            conns[0].run(f"mkdir -p /root/lab-tests-{profile.name}")
+            # Cleared first, like the suite and the source: pushing over the
+            # top leaves a deleted test file behind on the node, and it keeps
+            # running. Three tests removed from this repository went on being
+            # reported as failures by the next run.
+            conns[0].run(f"rm -rf /root/lab-tests-{profile.name} && "
+                         f"mkdir -p /root/lab-tests-{profile.name}")
             conns[0].push_dir(profile.tests, f"/root/lab-tests-{profile.name}")
 
         # The source under test goes to *every* node. A storage plugin is a
