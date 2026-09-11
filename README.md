@@ -130,6 +130,28 @@ profile can build and install the thing under test rather than pulling its last
 release. Without it the lab tests whatever was published — which is precisely
 the code you are not trying to find bugs in.
 
+## Phases
+
+A whole run is one command, but each phase can be invoked on its own. CI wants
+this: a failing step then names the thing that broke instead of burying it in
+one long log.
+
+```bash
+bash run.sh --profile-dir ./profiles/zfs --profile-dir ./profiles/btrfs --phase prepare
+bash run.sh --phase suite --only zfs
+bash run.sh --phase suite --only btrfs
+bash run.sh --phase report
+bash run.sh --phase teardown
+```
+
+`prepare` writes a plan into the lab directory — which profiles, which disks,
+which storage each registered — and the later phases read it. So they need no
+arguments of their own, and cannot be handed different ones half way through a
+run.
+
+Only a whole-run invocation clears previous results; a per-suite phase adds to
+them, so `report` at the end sees every suite rather than just the last.
+
 ## Expected results
 
 "Did the suite pass" is the wrong question once a backend has known defects: a

@@ -15,6 +15,16 @@
 #   run.sh --profile-dir ./profiles/zfs
 #   run.sh --profile-dir ./profiles/zfs --profile-dir ./profiles/lvm-thin --cross
 #
+# Phases can be run separately, which is what CI wants: a failing step then
+# names the thing that broke instead of burying it in one long log. `prepare`
+# writes a plan into the lab directory that the later phases read, so they do
+# not need the profile arguments again.
+#
+#   run.sh --profile-dir ./profiles/zfs --phase prepare
+#   run.sh --phase suite --only zfs
+#   run.sh --phase report
+#   run.sh --phase teardown
+#
 # A profile is a directory containing:
 #   profile.env        - NAME, DISKS, and optional TESTS / SOURCE paths
 #   setup.sh           - runs on the node as root; registers the storage and
@@ -34,6 +44,8 @@ NAME="${LAB_NAME:-lab}"
 PROFILE_DIRS=()
 CROSS=0
 KEEP=0
+PHASE=all
+ONLY=""
 PYTEST_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -42,13 +54,36 @@ while [[ $# -gt 0 ]]; do
         --profile-dir) PROFILE_DIRS+=("$2");   shift 2 ;;
         --cross)       CROSS=1;                shift ;;
         --keep)        KEEP=1;                 shift ;;
+        --phase)       PHASE="$2";             shift 2 ;;
+        --only)        ONLY="$2";              shift 2 ;;
         --)            shift; PYTEST_ARGS=("$@"); break ;;
         -h|--help)     sed -n '2,27p' "$0"; exit 0 ;;
         *)             PYTEST_ARGS+=("$1");    shift ;;
     esac
 done
 
-[[ ${#PROFILE_DIRS[@]} -gt 0 ]] || die "at least one --profile-dir is required"
+case "$PHASE" in
+    all|prepare|suite|report|teardown) ;;
+    *) die "unknown phase: $PHASE (all, prepare, suite, report, teardown)" ;;
+esac
+
+STATE="$(lab_state_dir)"
+LAB="$STATE/labs/$NAME"
+PLAN="$LAB/plan.env"
+RESULTS="$LAB/results"
+
+# Phases after prepare read the plan rather than re-deriving it, so a caller
+# does not have to repeat the profile arguments - and cannot accidentally pass
+# different ones half way through a run.
+if [[ "$PHASE" == all || "$PHASE" == prepare ]]; then
+    [[ ${#PROFILE_DIRS[@]} -gt 0 ]] || die "at least one --profile-dir is required"
+else
+    [[ -f "$PLAN" ]] || die "no plan at $PLAN - run --phase prepare first"
+    # shellcheck disable=SC1090
+    source "$PLAN"
+    read -r -a PROFILE_DIRS <<< "$PLAN_PROFILE_DIRS"
+    [[ $CROSS -eq 1 ]] || CROSS="$PLAN_CROSS"
+fi
 
 # ── Resolve the profiles ─────────────────────────────────────────────────────
 
@@ -77,6 +112,15 @@ done
 # it wants none, so a lab is never created with zero.
 [[ $total_disks -gt 0 ]] || total_disks=1
 
+run_prepare=0; run_suites=0; run_report=0; run_teardown=0
+case "$PHASE" in
+    all)      run_prepare=1; run_suites=1; run_report=1; run_teardown=1 ;;
+    prepare)  run_prepare=1 ;;
+    suite)    run_suites=1 ;;
+    report)   run_report=1 ;;
+    teardown) run_teardown=1 ;;
+esac
+
 # ── Derived images ───────────────────────────────────────────────────────────
 #
 # Profiles with expensive setup bake it into an image. Several such profiles
@@ -85,6 +129,7 @@ done
 
 VARIANT=base
 for i in "${!P_DIR[@]}"; do
+    [[ $run_prepare -eq 1 ]] || break
     [[ -f "${P_DIR[$i]}/bake.sh" ]] || continue
     next="${VARIANT}+${P_NAME[$i]}"
     [[ "$VARIANT" == base ]] && next="${P_NAME[$i]}"
@@ -95,13 +140,13 @@ done
 
 # ── Lab ──────────────────────────────────────────────────────────────────────
 
-STATE="$(lab_state_dir)"
-LAB="$STATE/labs/$NAME"
-
-if [[ ! -f "$LAB/qemu.pid" ]] || ! kill -0 "$(cat "$LAB/qemu.pid" 2>/dev/null)" 2>/dev/null; then
-    log_info "no lab running; starting one ($total_disks test disks)"
-    "$ROOT/lab/up.sh" --name "$NAME" --variant "$VARIANT" --disks "$total_disks" >&2
+if [[ $run_prepare -eq 1 ]]; then
+    if [[ ! -f "$LAB/qemu.pid" ]] || ! kill -0 "$(cat "$LAB/qemu.pid" 2>/dev/null)" 2>/dev/null; then
+        log_info "no lab running; starting one ($total_disks test disks)"
+        "$ROOT/lab/up.sh" --name "$NAME" --variant "$VARIANT" --disks "$total_disks" >&2
+    fi
 fi
+[[ -f "$LAB/lab.env" ]] || die "lab '$NAME' is not up"
 # shellcheck disable=SC1091
 source "$LAB/lab.env"
 
@@ -127,6 +172,7 @@ node_run_script() {
 
 # ── Ship everything ──────────────────────────────────────────────────────────
 
+if [[ $run_prepare -eq 1 ]]; then
 log_info "copying suite to the node"
 node_ssh "rm -rf /root/lab-suite && mkdir -p /root/lab-suite"
 node_push "$ROOT/suite" /root/lab-suite
@@ -147,9 +193,12 @@ for i in "${!P_DIR[@]}"; do
     fi
 done
 
+fi   # run_prepare: ship
+
 # ── Apply the profiles ───────────────────────────────────────────────────────
 
 STORAGES=()
+if [[ $run_prepare -eq 1 ]]; then
 for i in "${!P_DIR[@]}"; do
     pname="${P_NAME[$i]}"
     first="${P_FIRSTDISK[$i]}"
@@ -192,10 +241,22 @@ done
 # The cross-storage suite needs to know every storage that exists.
 node_ssh "printf 'STORAGES=%s\n' '$(IFS=,; echo "${STORAGES[*]}")' > /root/lab-storages.env"
 
+# Record the plan so the later phases need no arguments of their own.
+mkdir -p "$LAB"
+{
+    printf 'PLAN_PROFILE_DIRS=%q\n' "${P_DIR[*]}"
+    printf 'PLAN_CROSS=%s\n' "$CROSS"
+    printf 'PLAN_STORAGES=%q\n' "${STORAGES[*]}"
+} > "$PLAN"
+log_info "plan written to $PLAN"
+fi   # run_prepare: apply
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
-RESULTS="$LAB/results"
-rm -rf "$RESULTS"; mkdir -p "$RESULTS"
+mkdir -p "$RESULTS"
+# Only a whole-run invocation clears previous results. A per-suite phase must
+# add to them, or the report at the end would only ever see the last suite.
+[[ "$PHASE" == all ]] && { rm -rf "$RESULTS"; mkdir -p "$RESULTS"; }
 status=0
 
 # Shell-quoted, because these are interpolated into a script that runs on the
@@ -225,31 +286,38 @@ REMOTE
     return 0
 }
 
-for i in "${!P_DIR[@]}"; do
-    pname="${P_NAME[$i]}"
-    targets="tests"
-    if [[ -n "${P_TESTS[$i]}" ]]; then
-        node_ssh "cp -r /root/lab-tests-$pname/. /root/lab-suite/tests/"
-    fi
-    run_suite "$pname" "/root/lab-test-$pname.env" "$targets"
-done
+if [[ $run_suites -eq 1 ]]; then
+    for i in "${!P_DIR[@]}"; do
+        pname="${P_NAME[$i]}"
+        # --only picks one suite out of the plan, so CI can give each storage
+        # its own step and name the one that failed.
+        [[ -z "$ONLY" || "$ONLY" == "$pname" ]] || continue
+        if [[ -n "${P_TESTS[$i]}" ]]; then
+            node_ssh "cp -r /root/lab-tests-$pname/. /root/lab-suite/tests/"
+        fi
+        run_suite "$pname" "/root/lab-test-$pname.env" "tests"
+    done
 
-if [[ $CROSS -eq 1 ]]; then
-    if [[ ${#STORAGES[@]} -lt 2 ]]; then
-        log_warn "--cross needs at least two storages; skipping"
-    else
-        run_suite "cross" "/root/lab-test-${P_NAME[0]}.env" "-m crossstorage tests"
+    if [[ $CROSS -eq 1 ]] && [[ -z "$ONLY" || "$ONLY" == cross ]]; then
+        read -r -a planned <<< "${PLAN_STORAGES:-${STORAGES[*]}}"
+        if [[ ${#planned[@]} -lt 2 ]]; then
+            log_warn "--cross needs at least two storages; skipping"
+        else
+            run_suite "cross" "/root/lab-test-${P_NAME[0]}.env" "-m crossstorage tests"
+        fi
     fi
 fi
 
 # ── Collect ──────────────────────────────────────────────────────────────────
 #
 # Anything reproducing a failure needs to know exactly what it ran against.
+if [[ $run_report -eq 1 ]]; then
 node_ssh "pveversion | head -1; uname -r; date -Is; cat /root/lab-test-*.env" \
     > "$RESULTS/environment.txt" 2>/dev/null || true
 cp "$LAB/console.log" "$RESULTS/console.log" 2>/dev/null || true
+fi
 
-if [[ $KEEP -eq 0 ]]; then
+if [[ $run_teardown -eq 1 && $KEEP -eq 0 ]]; then
     for i in "${!P_DIR[@]}"; do
         pname="${P_NAME[$i]}"
         [[ -f "${P_DIR[$i]}/teardown.sh" ]] || continue
@@ -264,20 +332,26 @@ fi
 # every run, and a suite that is always red tells you nothing the day something
 # new breaks. report.py separates unexpected failures from declared ones, and
 # flags any declared one that has started passing.
-EXPECT_ARGS=()
-for dir in "${P_DIR[@]}"; do
-    [[ -f "$dir/expectations.toml" ]] && EXPECT_ARGS+=("$dir/expectations.toml")
-done
+if [[ $run_report -eq 1 ]]; then
+    EXPECT_ARGS=()
+    for dir in "${P_DIR[@]}"; do
+        [[ -f "$dir/expectations.toml" ]] && EXPECT_ARGS+=("$dir/expectations.toml")
+    done
 
-log_info "results in $RESULTS"
-verdict=0
-python3 "$ROOT/tools/report.py" "$RESULTS" "${EXPECT_ARGS[@]}" \
-    > "$RESULTS/summary.md" || verdict=$?
-cat "$RESULTS/summary.md"
+    log_info "results in $RESULTS"
+    verdict=0
+    python3 "$ROOT/tools/report.py" "$RESULTS" "${EXPECT_ARGS[@]}" \
+        > "$RESULTS/summary.md" || verdict=$?
+    cat "$RESULTS/summary.md"
 
-if [[ $verdict -eq 0 ]]; then
-    log_info "nothing new broke"
-else
-    log_error "unexpected failures - see $RESULTS/summary.md"
+    if [[ $verdict -eq 0 ]]; then
+        log_info "nothing new broke"
+    else
+        log_error "unexpected failures - see $RESULTS/summary.md"
+    fi
+    exit $verdict
 fi
-exit $verdict
+
+# A phase that only ran suites reports pytest's own status; the verdict comes
+# later, from the report phase, once every suite's results are in.
+exit $status
