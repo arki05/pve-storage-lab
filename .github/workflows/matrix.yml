@@ -1,0 +1,158 @@
+name: matrix
+
+# Manual only. A full matrix boots two nodes, formats every backend and runs
+# the suite once per storage plus the cross-storage pairs - hours of a machine.
+# Nothing here should start it by accident, so there is no push trigger.
+on:
+  workflow_dispatch:
+    inputs:
+      profiles:
+        description: "Built-in profiles to test, space separated"
+        default: "zfs btrfs dir lvm-thin"
+      with_pve_bcachefs:
+        description: "Also test arki05/pve-bcachefs"
+        type: boolean
+        default: true
+      with_other_bcachefs:
+        description: >-
+          Also test MmAaXx500/pve-storage-plugin-bcachefs, in its own lab. It
+          installs to the same path and registers the same storage type as
+          pve-bcachefs, so the two cannot share a node.
+        type: boolean
+        default: false
+      cross:
+        description: "Run the cross-storage round trips"
+        type: boolean
+        default: true
+      pytest_args:
+        description: "Extra pytest arguments, e.g. -k Quota"
+        default: ""
+
+permissions:
+  contents: read
+
+# One lab per runner. Runs queue rather than race, and a half-torn-down lab is
+# worse than a wait.
+concurrency:
+  group: storage-lab-matrix
+  cancel-in-progress: false
+
+jobs:
+  matrix:
+    runs-on: [self-hosted, pve-storage-lab]
+    timeout-minutes: 720
+    env:
+      PVE_LAB_STATE: /home/runner/lab-state
+      PROFILES: ${{ github.event.inputs.profiles }}
+      PYTEST_ARGS: ${{ github.event.inputs.pytest_args }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lab
+
+      - uses: actions/checkout@v4
+        if: github.event.inputs.with_pve_bcachefs == 'true'
+        with:
+          repository: arki05/pve-bcachefs
+          path: pve-bcachefs
+
+      - name: Build the base image if the runner has none
+        run: |
+          set -euo pipefail
+          if [ -f "$PVE_LAB_STATE/images/pve-9.2-1-base.qcow2" ]; then
+            echo "base image present, reusing it"
+          else
+            cd "$GITHUB_WORKSPACE/lab" && make image
+          fi
+
+      - name: Prepare the lab
+        run: |
+          set -euo pipefail
+          args=()
+          for p in $PROFILES; do
+            args+=(--profile-dir "$GITHUB_WORKSPACE/lab/profiles/$p")
+          done
+          if [ "${{ github.event.inputs.with_pve_bcachefs }}" = true ]; then
+            args+=(--profile-dir "$GITHUB_WORKSPACE/pve-bcachefs/test/profile")
+          fi
+          [ "${{ github.event.inputs.cross }}" = true ] && args+=(--cross)
+          cd "$GITHUB_WORKSPACE/lab"
+          ./bin/lab run "${args[@]}" --nodes 2 --disk-size 6G --phase prepare
+
+      # One step per storage, so a red step names the backend that broke.
+      - name: Suite
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE/lab"
+          status=0
+          suites="$PROFILES"
+          [ "${{ github.event.inputs.with_pve_bcachefs }}" = true ] && suites="$suites bcachefs"
+          [ "${{ github.event.inputs.cross }}" = true ] && suites="$suites cross"
+          for s in $suites; do
+            echo "::group::suite $s"
+            ./bin/lab run --phase suite --only "$s" -- $PYTEST_ARGS || status=1
+            echo "::endgroup::"
+          done
+          # Not the verdict: report decides, from unexpected failures only.
+          echo "suites finished with $status"
+
+      - name: Report
+        if: always()
+        run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --phase report
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: matrix-results
+          path: /home/runner/lab-state/labs/lab/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Tear down
+        if: always()
+        run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --phase teardown || true
+
+  # Its own lab, because libpve-storage-plugin-bcachefs-perl installs
+  # PVE/Storage/Custom/BcachefsPlugin.pm and registers the storage type
+  # 'bcachefs' - the same file and the same type as pve-bcachefs.
+  other-bcachefs:
+    needs: matrix
+    if: always() && github.event.inputs.with_other_bcachefs == 'true'
+    runs-on: [self-hosted, pve-storage-lab]
+    timeout-minutes: 360
+    env:
+      PVE_LAB_STATE: /home/runner/lab-state
+      PYTEST_ARGS: ${{ github.event.inputs.pytest_args }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lab
+
+      - name: Prepare
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/lab"
+          ./bin/lab run --name other --nodes 2 --disk-size 6G \
+            --profile-dir "$GITHUB_WORKSPACE/lab/contrib/profiles/bcachefs-mm" \
+            --phase prepare
+
+      - name: Suite
+        run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --name other --phase suite --only bcachefs-mm -- $PYTEST_ARGS
+
+      - name: Report
+        if: always()
+        run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --name other --phase report
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: other-bcachefs-results
+          path: /home/runner/lab-state/labs/other/results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Tear down
+        if: always()
+        run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --name other --phase teardown || true

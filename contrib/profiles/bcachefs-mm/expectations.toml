@@ -1,0 +1,25 @@
+# What this plugin's own documentation says it cannot do. Nothing else is
+# declared up front - a limitation nobody has measured is a guess, and a guess
+# that silences a test is how coverage rots.
+
+[[expected]]
+profile = "bcachefs-mm"
+marker = "snapshot_migration"
+kind = "limitation"
+reason = """
+Its README says so directly: "import storage type is not supported, because
+bcachefs currently does not support send/receive functionality." That is the
+same wall pve-bcachefs hits, and it is the filesystem's, not the plugin's -
+there is no stream format that can carry a snapshot across.
+"""
+
+[[expected]]
+profile = "bcachefs-mm"
+marker = "size_enforcement"
+kind = "limitation"
+reason = """
+No project-quota path: a container rootfs is a subvolume on a filesystem with
+no quota applied to it, so the configured size is metadata rather than a
+limit. Declared rather than skipped, so if the plugin gains enforcement the
+run says so instead of staying quiet.
+"""
