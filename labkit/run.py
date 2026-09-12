@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import cluster, images, state
-from .lab import connection, read_env
+from .lab import connection, down as lab_down, read_env
 from .lab import up as lab_up
 from .profiles import Profile, assign_disks
 from .ssh import NodeSSH
@@ -80,8 +80,13 @@ def prepare(profile_dirs: list[str], name: str = "lab", nodes: int = 1,
                                           out_variant=nxt)
 
     total_disks = max(1, sum(p.disks for p in profiles))
+    # fresh: a lab left running by an earlier run - or by one that was
+    # cancelled half way - would otherwise be reused as-is, including its test
+    # disks. The suite then runs on top of the previous run's filesystems, and
+    # the second or third run fills them: "No space left on device" out of a
+    # backend that has plenty.
     lab_up(name=name, count=nodes, disks=total_disks, disk_size=disk_size,
-           mem=mem, cpus=cpus, variant=variant,
+           mem=mem, cpus=cpus, variant=variant, fresh=True,
            ensure_image=lambda index, v: images.node_image(index, v))
     if nodes > 1:
         cluster.form(name, nodes)
@@ -231,11 +236,22 @@ def report(name: str = "lab") -> int:
 
 
 def teardown(name: str = "lab") -> None:
+    """Unregister the storages, then stop the lab and discard its disks.
+
+    The profile teardowns alone left the nodes running and their disks on
+    disk - 22 GB of them, holding the filesystems the run had just written.
+    Nothing reclaimed that, so a later run either reused them or filled them.
+    """
     plan = Plan.load(name)
-    conns = _connections(name, plan.nodes)
-    for profile in plan.profiles:
-        if not (profile.path / "teardown.sh").exists():
-            continue
-        for conn in conns:
-            conn.run(f"bash /root/lab-profile-{profile.name}/teardown.sh",
-                     check=False)
+    try:
+        conns = _connections(name, plan.nodes)
+        for profile in plan.profiles:
+            if not (profile.path / "teardown.sh").exists():
+                continue
+            for conn in conns:
+                conn.run(f"bash /root/lab-profile-{profile.name}/teardown.sh",
+                         check=False)
+    except Exception as exc:                   # noqa: BLE001
+        # A node that is already gone must not stop the disks being reclaimed.
+        log.warning("profile teardown did not complete: %s", exc)
+    lab_down(name, reset=True)
