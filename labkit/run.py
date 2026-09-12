@@ -219,7 +219,9 @@ def report(name: str = "lab") -> int:
     expectations = [str(p.path / "expectations.toml") for p in plan.profiles
                     if (p.path / "expectations.toml").exists()]
     proc = subprocess.run(
-        ["python3", str(ROOT / "tools" / "report.py"), str(results), *expectations],
+        ["python3", str(ROOT / "tools" / "report.py"), str(results), *expectations,
+         "--badge", str(results / "badge.json"),
+         "--html", str(results / "index.html")],
         capture_output=True, text=True)
     (results / "summary.md").write_text(proc.stdout)
     print(proc.stdout)

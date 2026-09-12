@@ -290,6 +290,13 @@ reason = "raw+size and tar+size have nowhere to put a snapshot, so PVE refuses
 the migration up front rather than dropping them silently"
 ```
 
+`tools/report.py --badge --html` turns the same three buckets into a
+shields.io endpoint and a standalone page, so a consumer repository can show a
+live **passed / known issues / failing** breakdown in its README and click
+through to the detail. `pve-bcachefs` publishes its to GitHub Pages from a
+separate job on a GitHub-hosted runner - the self-hosted box runs the lab and
+holds no publishing credentials.
+
 Three buckets come out, and the third is the one that matters:
 
 | | |
