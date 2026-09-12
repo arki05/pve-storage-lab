@@ -9,8 +9,14 @@ not worth optimising away.
 """
 
 import json
+import re
 import socket
 import subprocess
+
+# UPID:<node>:<pid>:<pstart>:<starttime>:<type>:<id>:<user>: - the trailing
+# colon is part of it, and it is followed by a quote or whitespace wherever it
+# appears in pvesh's output.
+UPID_RE = re.compile(r'UPID:[^\s"\']+')
 
 
 class PVEError(RuntimeError):
@@ -57,17 +63,29 @@ class PVE:
         except json.JSONDecodeError:
             pass
 
-        # A task-starting endpoint streams the task's log to stdout and prints
-        # the UPID on the last line, so the whole blob is not JSON - and pvesh
-        # exits 0 even when the task it just watched failed. Returning the blob
-        # meant callers handed wait_for_task something that did not start with
-        # "UPID", which it quietly ignored: a migration could abort and the
-        # test would sail past it, to fail later on something unrelated.
-        last = out.splitlines()[-1].strip()
-        try:
-            return json.loads(last)
-        except json.JSONDecodeError:
-            return out
+        # A task-starting endpoint streams the task's log to stdout alongside
+        # the UPID, so the whole blob is not JSON - and pvesh exits 0 even when
+        # the task it just watched failed. Returning the blob meant callers
+        # handed wait_for_task something that did not start with "UPID", which
+        # it quietly ignored: a migration could abort and the test would sail
+        # past it, to fail later on something unrelated.
+        #
+        # The UPID's position is not dependable. It is on its own last line for
+        # some calls, glued to the end of a warning with no newline for others
+        # ('...enable nesting."UPID:pve-node2:...:vzstart:102:root@pam:"'), and
+        # followed by more log for others still. So: take a JSON line if there
+        # is one, and otherwise pull the last UPID out of the text.
+        for line in reversed(out.splitlines()):
+            try:
+                value = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, str) and value.startswith("UPID:"):
+                return value
+        found = UPID_RE.findall(out)
+        if found:
+            return found[-1]
+        return out
 
     # `_timeout` is popped rather than passed to pvesh: an operation that
     # legitimately takes an hour - a migration, a large backup - needs to say
