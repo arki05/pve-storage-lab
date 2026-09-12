@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """Turn junit results into a verdict and a readable summary.
 
-Exists because "did the suite pass" is the wrong question once a backend has
-known defects. A run is good when nothing *new* broke - so the exit status here
-is driven by unexpected failures, not by the raw count.
+The exit status is driven by unexpected failures, not by the raw count: a
+backend with declared known defects would otherwise be red on every run.
 
-Three buckets come out:
+Three buckets:
 
   failures              not listed in expectations. These block.
   expected failures     listed, and failed. Reported, do not block.
