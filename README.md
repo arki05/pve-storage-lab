@@ -11,7 +11,7 @@ usable from a self-hosted CI runner.
 ## Requirements
 
 - `/dev/kvm`
-- `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh`, `python3` (3.11+)
+- `qemu-system-x86_64`, `qemu-img`, `curl`, `ssh`, `make`, `python3` (3.11+)
 - `proxmox-auto-install-assistant` (installs on plain Debian from
   `http://download.proxmox.com/debian/pve`)
 
