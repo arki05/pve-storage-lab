@@ -247,7 +247,7 @@ $APT install -y -qq --no-install-recommends python3-pytest python3-requests jq f
 $APT clean
 
 # Without a serial console a node that fails to boot is completely silent -
-# lab/up.sh writes console.log and it stays empty. Costs nothing, saves an
+# The lab writes console.log and it stays empty. Costs nothing, saves an
 # afternoon.
 sed -i 's|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT="quiet console=tty0 console=ttyS0,115200"|' /etc/default/grub
 grep -q GRUB_TERMINAL /etc/default/grub || printf 'GRUB_TERMINAL="console serial"\nGRUB_SERIAL_COMMAND="serial --speed=115200"\n' >> /etc/default/grub

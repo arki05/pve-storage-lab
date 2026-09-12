@@ -30,21 +30,24 @@ character device is the entire elevated surface.
 ## Quick start
 
 ```bash
-# Build the node image once (~11 min, unattended)
-bash lab/build-image.sh
+# Build the base image once (~10 min, unattended)
+make image
 
-# Boot a node with four test disks
-bash lab/up.sh --disks 4 --disk-size 8G
+# Run the suite against a storage: brings a lab up, tests it, reports
+./bin/lab run --profile-dir ./profiles/lvm-thin
 
-# Run the suite against a storage
-bash run.sh --profile-dir ./profiles/lvm-thin
-
-# Shell into the node
-bash lab/ssh.sh
-
-# Stop it; --reset also discards the overlay
-bash lab/down.sh --reset
+# Or drive the lab directly
+./bin/lab up --nodes 1 --disks 4 --disk-size 8G
+./bin/lab ssh
+./bin/lab status
+./bin/lab down --reset          # --reset also discards the disks
 ```
+
+Orchestration is Python (`labkit/`, driven by `bin/lab`). What runs *on* a
+node stays shell, pushed as a file and run with arguments - there is no
+heredoc anywhere with two levels of expansion in it. The base image build is
+still a shell script, because it is one long unattended install that never
+needed the structure.
 
 ## How a run is shaped
 
@@ -66,19 +69,20 @@ targets, erasure coding) is not testable on one disk.
 ## Two nodes
 
 ```bash
-bash run.sh --profile-dir ./profiles/zfs --nodes 2
+./bin/lab run --profile-dir ./profiles/zfs --nodes 2
 ```
 
 Migration is the only reason this exists — PVE cannot move a guest between
 unclustered nodes — and it is opt-in, so single-node runs are unchanged.
 
 Each node boots from its **own node image**: the base image plus that node's
-identity, built by `lab/node-image.sh` as a qcow2 overlay costing ~15 MB. A
+identity, built by `labkit/images.py` as a qcow2 overlay costing ~15 MB. A
 node comes up correct rather than being corrected afterwards, and the PVE
 rename happens once, on a standalone node, instead of during cluster
 formation.
 
-Everything about a node is derived from its index (`lib/nodes.sh`):
+Everything about a node is derived from its index and its lab's name
+(`labkit/nodes.py`):
 
 | node | hostname | management | guest bridge | cluster |
 |---|---|---|---|---|
@@ -116,7 +120,7 @@ rather than discovered later:
 ## Testing several storages at once
 
 ```bash
-bash run.sh --profile-dir ./profiles/zfs \
+./bin/lab run --profile-dir ./profiles/zfs \
             --profile-dir ./profiles/btrfs \
             --profile-dir ./profiles/lvm-thin --cross
 ```
@@ -156,34 +160,65 @@ profile exists, and silently steals another storage's disk the moment one
 doesn't.
 
 `setup.sh` must append `STORAGE_NAME=` to `$LAB_TEST_CONFIG`. Everything else
-is discovered. `capabilities.env` decides which tests apply:
+is discovered.
 
-| key | gates |
-|---|---|
-| `SUPPORTS_SNAPSHOTS` | snapshot, rollback, snapshot-mode backup |
-| `SUPPORTS_LINKED_CLONE` | linked clones |
-| `SUPPORTS_BACKUP` | vzdump and restore |
-| `SUPPORTS_LXC` | every container test |
-| `SUPPORTS_IMAGES` | every VM test |
+### Capabilities do not gate tests
+
+Every test runs against every backend. A capability is a **label**, not a
+switch: what a backend genuinely cannot do is declared in `expectations.toml`,
+and the runner sorts the results into three buckets — failures, expected
+failures, and *stale* expectations, which are declarations that started
+passing.
+
+That last bucket is the whole point. The obvious design is to skip a test a
+backend does not support, and it is wrong in a way that hides bugs silently: a
+capability declared `false` by mistake means the test never runs and nothing
+says so. That is not hypothetical — `SUPPORTS_LINKED_CLONE=false` was declared
+on a backend that supports linked clones perfectly well, and the tests sat
+unrun for a day. Under this model they would have run, passed, and been
+reported as a stale declaration.
+
+```toml
+[[expected]]
+profile = "bcachefs"
+marker = "ct_resize_visible"
+kind = "limitation"
+reason = "the rootfs is a subvolume on a much larger filesystem, so df inside
+reports the filesystem rather than the quota - the limit is real and simply
+not visible from in there"
+```
+
+Declared by capability **marker** rather than test name, because names drift
+and capabilities do not; `test = "glob"` is there for the one-off. `kind` is
+`limitation` for something a backend cannot do and `known-bug` for something
+it should do and does not — the distinction is for whoever reads the report,
+not for the runner.
+
+`capabilities.env` still exists, for values a test needs to *read* rather than
+be gated by: a mount point, whether project quotas are on, the command that
+checks the filesystem is undamaged.
+
+### Pointing it at your own plugin
 
 A plugin repository keeps its own profile and passes it in, so this repository
 never grows backend-specific knowledge:
 
 ```bash
-bash run.sh --profile-dir ../pve-bcachefs/test/profile \
-            --extra-tests ../pve-bcachefs/test/tests \
-            --source-dir  ../pve-bcachefs
+./bin/lab run --profile-dir ../pve-bcachefs/test/profile --nodes 2
 ```
 
-`--source-dir` ships the working tree to the node as `/root/lab-source`, so a
-profile can build and install the thing under test rather than pulling its last
-release. Without it the lab tests whatever was published — which is precisely
-the code you are not trying to find bugs in.
+`TESTS=` and `SOURCE=` in `profile.env` do the rest. `SOURCE` ships the working
+tree to **every** node, so a profile can build and install the thing under test
+rather than pulling its last release — without it the lab tests whatever was
+published, which is precisely the code you are not trying to find bugs in. It
+goes to every node rather than the first, because a storage plugin is a Perl
+module on each of them, and shipping it to one leaves the cluster behaving
+differently depending on where a guest happens to land.
 
 ## Cross-storage
 
 ```bash
-bash run.sh --profile-dir ./profiles/zfs \
+./bin/lab run --profile-dir ./profiles/zfs \
             --profile-dir ./profiles/btrfs \
             --profile-dir ./profiles/lvm-thin --cross
 ```
@@ -222,11 +257,11 @@ this: a failing step then names the thing that broke instead of burying it in
 one long log.
 
 ```bash
-bash run.sh --profile-dir ./profiles/zfs --profile-dir ./profiles/btrfs --phase prepare
-bash run.sh --phase suite --only zfs
-bash run.sh --phase suite --only btrfs
-bash run.sh --phase report
-bash run.sh --phase teardown
+./bin/lab run --profile-dir ./profiles/zfs --profile-dir ./profiles/btrfs --phase prepare
+./bin/lab run --phase suite --only zfs
+./bin/lab run --phase suite --only btrfs
+./bin/lab run --phase report
+./bin/lab run --phase teardown
 ```
 
 `prepare` writes a plan into the lab directory — which profiles, which disks,
@@ -249,9 +284,10 @@ declares results that are already known:
 ```toml
 [[expected]]
 profile = "bcachefs"
-test = "*test_rsync_with_xattrs_off_the_volume*"
-kind = "known-bug"
-reason = "..."
+marker = "snapshot_migration"
+kind = "limitation"
+reason = "raw+size and tar+size have nowhere to put a snapshot, so PVE refuses
+the migration up front rather than dropping them silently"
 ```
 
 Three buckets come out, and the third is the one that matters:
@@ -268,9 +304,8 @@ holds is a claim about the system that has quietly become false, which is
 exactly what the file exists to prevent.
 
 `kind` distinguishes a **known-bug** — real, tracked, tolerated for now — from
-a **sanctioned** difference, which is not a defect and will never be fixed.
-Prefer recording sanctioned differences as facts rather than as suppressed
-failures.
+a **limitation**, which is not a defect and will never be fixed. Prefer
+recording limitations as facts rather than as suppressed failures.
 
 ## Payload shape is a test dimension
 
@@ -306,6 +341,25 @@ rollback after resize, snapshot under `fio` load, back-to-back allocation —
 which is where individually-correct operations turn out to be wrong in
 sequence.
 
+Some axes exist because a bug hid in them:
+
+- **aio modes.** `test_aio.py` runs a verified write, an fsynced hard stop and
+  a snapshot under live I/O through `io_uring`, `threads` and `native`. They
+  take different paths into the kernel, so a storage can be well behaved in
+  one and not the others, and everything else runs whatever PVE defaults to.
+- **The CLI, not just the API.** `pct` and `qm` run Perl with `-T`, where a
+  path built from a config file is tainted and `syscall()` refuses it;
+  `pvedaemon` does not. A suite that only drives `pvesh` will pass in full
+  against a storage on which `pct create` cannot create a container at all -
+  which is exactly what happened.
+- **Stopped volumes.** Comparing a guest's filesystem before and after an
+  operation only means something with the guest stopped. Measured from inside
+  a running container, a plain restart with no operation at all changes a
+  dozen paths, and the check can never hold on any backend.
+- **In-flight I/O.** Snapshots, rollbacks and live migrations are taken with
+  `fio --verify` running, throttled so the test measures the operation rather
+  than whether the guest can outrun it.
+
 ## Notes from building this
 
 Three things cost real time and are worth knowing if you extend it:
@@ -324,4 +378,9 @@ Three things cost real time and are worth knowing if you extend it:
 
 ## License
 
-MIT.
+AGPL-3.0-or-later, the same as Proxmox VE and pve-bcachefs. See `LICENSE`.
+
+A profile is configuration and shell that this harness consumes, so writing
+one for your plugin keeps your plugin's licence entirely to itself. Test files
+that import from `suite/` are a different matter - those are derivative of
+this, and AGPL applies to them.
