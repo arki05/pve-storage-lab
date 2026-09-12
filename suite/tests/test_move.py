@@ -68,8 +68,11 @@ class TestCTMove:
         # Contents are not the whole story: a move that preserves every byte
         # and loses ownership, hardlinks or xattrs is still broken.
         meta = MetadataFixture(ct.exec()).create()
-        tree = guard.tree_fingerprint()
         ct.stop()
+        # Taken with the container stopped, so the volume holds still. Doing
+        # this from inside a running guest compared the rootfs across a reboot,
+        # which no backend survives: systemd alone rewrites a dozen paths.
+        tree = ct.volume_fingerprint()
 
         wait_for_task(pve, pve.create(
             f"/nodes/{node}/lxc/{ct.vmid}/move_volume",
@@ -83,12 +86,14 @@ class TestCTMove:
         ), timeout=1800)
         assert_relocated(pve, ct, "rootfs", OTHER_STORAGE, storage, "moving back")
 
+        # Still stopped, so this is the same measurement as before the move.
+        assert ct.volume_fingerprint() == tree, (
+            "the volume's file tree changed across the move - something "
+            "outside the seeded files was lost, resized or re-owned")
+
         ct.start()
         guard.guest = ct.exec()
         meta.guest = ct.exec()
         guard.verify("after a move round trip")
         guard.verify_sparse("after a move round trip")
         meta.verify("after a move round trip")
-        assert guard.tree_fingerprint() == tree, (
-            "the volume's file tree changed across the move - something "
-            "outside the seeded files was lost, resized or re-owned")

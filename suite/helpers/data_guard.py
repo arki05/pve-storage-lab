@@ -9,15 +9,6 @@ that silently drops writes and not.
 from helpers.payloads import fill_command, occupancy
 
 
-# Written by the guest itself on every boot, so they say nothing about whether
-# a copy preserved anything. lost+found is here because a round trip through a
-# storage that allocates a raw ext4 image brings one back with it.
-VOLATILE = (
-    "run", "tmp", "var/tmp", "var/log", "var/cache", "var/lib/dhcp",
-    "var/lib/systemd", "lost+found",
-)
-
-
 class DataGuard:
     def __init__(self, guest):
         self.guest = guest
@@ -71,36 +62,6 @@ class DataGuard:
                 f"{allocated_before} of {apparent} apparent - the holes were "
                 f"written out as real blocks"
             )
-
-    def tree_fingerprint(self, path: str = "/", deep: bool = False) -> str:
-        """A digest of a whole tree.
-
-        Cheap by default: stat only, no file contents. A Debian rootfs is tens
-        of thousands of files, and hashing all of them after every operation
-        would add hours across a full matrix for very little signal. The
-        stat-only pass still catches files vanishing, changing size, or
-        changing ownership or mode - which is what a broken copy usually does.
-
-        `deep=True` hashes contents as well. Worth it once per pair in the
-        cross-storage tests, not after every operation.
-
-        Volatile paths are pruned. A guest that is stopped and started again
-        writes to them whatever the storage did, so including them made this
-        compare a running rootfs against itself across a reboot - which no
-        backend can satisfy. Measured on an untouched container: a plain
-        restart with no move at all changed fifteen entries, all of them
-        systemd-private temp directories with fresh random names, a grown
-        wtmp, a rotated journal and a rewritten DHCP lease.
-        """
-        prune = " -o ".join(f"-path ./{d}" for d in VOLATILE)
-        if deep:
-            command = (f"cd {path} && find . -xdev \\( {prune} \\) -prune -o "
-                       f"-type f -print0 | sort -z | "
-                       f"xargs -0 md5sum 2>/dev/null | md5sum")
-        else:
-            command = (f"cd {path} && find . -xdev \\( {prune} \\) -prune -o "
-                       f"-printf '%p|%y|%m|%U|%G|%s\n' | sort | md5sum")
-        return self.guest.run(command, timeout=900).split()[0]
 
     def verify_missing(self, context: str = "") -> None:
         """Assert the seeded files are gone - for rollback-to-before-seed."""

@@ -7,6 +7,7 @@ capabilities; nothing here knows about any particular backend.
 """
 
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -315,6 +316,42 @@ class LabCT(LabGuest):
     def exec(self) -> ContainerExec:
         return ContainerExec(self.vmid, self.node)
 
+    def volume_fingerprint(self) -> str:
+        """A digest of the rootfs, taken with the container stopped.
+
+        The point of taking it from the node rather than from inside is that a
+        stopped volume holds still. Fingerprinting a *running* rootfs before an
+        operation and again afterwards compares it across a reboot, and a
+        Debian guest rewrites enough on every boot - fresh systemd-private
+        directory names, a grown wtmp, a rotated journal, a new DHCP lease -
+        that the comparison can never hold, on any backend.
+
+        `pct mount` works whatever the volume actually is, so this reads a
+        subvolume, a raw image and a thin LV the same way.
+
+        lost+found is excluded: a round trip through a storage that allocates
+        a raw ext4 image brings one back, which is a property of that storage
+        rather than of the copy.
+        """
+        assert self.status() == "stopped", (
+            "volume_fingerprint needs the container stopped; a running rootfs "
+            "changes underneath it")
+        subprocess.run(["pct", "mount", str(self.vmid)],
+                       capture_output=True, text=True, timeout=300, check=True)
+        try:
+            root = f"/var/lib/lxc/{self.vmid}/rootfs"
+            result = subprocess.run(
+                ["bash", "-c",
+                 f"cd {root} && find . -xdev \\( -path ./lost+found \\) -prune -o "
+                 f"-printf '%p|%y|%m|%U|%G|%s\\n' | sort | md5sum"],
+                capture_output=True, text=True, timeout=900)
+            assert result.returncode == 0, (
+                f"fingerprinting the mounted volume failed: {result.stderr}")
+            return result.stdout.split()[0]
+        finally:
+            subprocess.run(["pct", "unmount", str(self.vmid)],
+                           capture_output=True, timeout=300)
+
 
 # ── Factories ────────────────────────────────────────────────────────────────
 
@@ -324,9 +361,15 @@ def create_vm(pve, node, storage, vm_template):
     created: list[LabVM] = []
 
     def _create(name: str = "lab-vm", memory: int = 1024, cores: int = 2,
-                full: bool = True, on: str | None = None) -> LabVM:
+                full: bool = True, on: str | None = None,
+                aio: str | None = None) -> LabVM:
         # `on` selects a storage other than the one under test, which is what
         # the cross-storage tests need.
+        #
+        # `aio` picks QEMU's I/O backend. Left alone it is whatever PVE
+        # defaults to, which is what almost every test wants; the tests that
+        # set it are checking that a backend behaves the same through all
+        # three, because a storage bug can live in one and not the others.
         target = on or storage
         vmid = pve.nextid()
         wait_for_task(pve, pve.create(
@@ -334,6 +377,16 @@ def create_vm(pve, node, storage, vm_template):
             newid=vmid, name=f"{name}-{vmid}", full=full, storage=target,
         ), timeout=600)
         pve.set(f"/nodes/{node}/qemu/{vmid}/config", memory=memory, cores=cores)
+        if aio:
+            config = pve.get(f"/nodes/{node}/qemu/{vmid}/config")
+            key = next((k for k in ("scsi0", "virtio0", "sata0", "ide0")
+                        if k in config), None)
+            assert key, f"VM {vmid} has no disk to set aio on: {sorted(config)}"
+            volume = config[key].split(",")[0]
+            options = [o for o in config[key].split(",")[1:]
+                       if not o.startswith("aio=")]
+            pve.set(f"/nodes/{node}/qemu/{vmid}/config",
+                    **{key: ",".join([volume, f"aio={aio}"] + options)})
         vm = LabVM(pve, node, vmid)
         created.append(vm)
         return vm
