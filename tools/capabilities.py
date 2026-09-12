@@ -1,68 +1,71 @@
 #!/usr/bin/env python3
-"""Print what each backend claims to support.
+"""Print what each backend is declared unable to do, and why.
 
-The capabilities drive the suite's skip logic, so this is also a statement of
-what was and was not tested - and the differences are worth reading on their
-own. "Roll back to last Tuesday" works on some of these and not others, and
-that is a design constraint, not a bug in either.
+This used to read `SUPPORTS_*` keys out of capabilities.env, back when those
+decided which tests ran. They decide nothing now - every test runs against
+every backend - and the keys were read by no test at all, so printing them
+described a mechanism that no longer existed.
+
+The real statement of what a backend cannot do is expectations.toml: each
+entry names a capability marker or a test, says whether it is a `limitation`
+(cannot, and never will) or a `known-bug` (should, and does not), and carries
+the reason. That is what this prints.
 
     tools/capabilities.py [--markdown] [profile-dir ...]
 """
 
 import sys
+import tomllib
 from pathlib import Path
 
-PREFIXES = ("SUPPORTS_", "ENFORCES_", "ROLLBACK_", "RESIZE_")
+ROOT = Path(__file__).resolve().parent.parent
 
 
-def read(path: Path) -> dict[str, str]:
-    values = {}
-    caps = path / "capabilities.env"
-    if not caps.exists():
-        return values
-    for line in caps.read_text().splitlines():
-        line = line.strip()
-        if line.startswith(PREFIXES) and "=" in line:
-            key, _, value = line.partition("=")
-            values[key] = value
-    return values
-
-
-def name_of(path: Path) -> str:
-    env = path / "profile.env"
-    if env.exists():
-        for line in env.read_text().splitlines():
-            if line.startswith("NAME="):
-                return line.partition("=")[2].strip()
-    return path.name
+def load(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    with path.open("rb") as handle:
+        return tomllib.load(handle).get("expected", [])
 
 
 def main(argv: list[str]) -> int:
     markdown = "--markdown" in argv
-    dirs = [Path(a) for a in argv[1:] if not a.startswith("--")]
-    if not dirs:
-        root = Path(__file__).resolve().parent.parent
-        dirs = sorted(p for p in (root / "profiles").iterdir() if p.is_dir())
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    dirs = [Path(a) for a in args] or sorted(
+        p for p in (ROOT / "profiles").iterdir() if p.is_dir())
 
-    data = {name_of(d): read(d) for d in dirs}
-    keys = sorted({k for v in data.values() for k in v})
-    names = list(data)
+    rows = []
+    for directory in dirs:
+        for entry in load(directory / "expectations.toml"):
+            rows.append((
+                entry.get("profile") or entry.get("pair") or directory.name,
+                entry.get("marker") or entry.get("test", "?"),
+                entry.get("kind", "?"),
+                " ".join(entry.get("reason", "").split()),
+            ))
+    for entry in load(ROOT / "expectations.toml"):
+        rows.append((entry.get("profile") or entry.get("pair") or "(any)",
+                     entry.get("marker") or entry.get("test", "?"),
+                     entry.get("kind", "?"),
+                     " ".join(entry.get("reason", "").split())))
 
-    def cell(value: str) -> str:
-        if not markdown:
-            return value
-        return {"true": "yes", "false": "no"}.get(value, value)
+    if not rows:
+        print("No declared limitations. Either everything works, or nobody "
+              "has run it yet.")
+        return 0
 
+    rows.sort()
     if markdown:
-        print("| capability | " + " | ".join(names) + " |")
-        print("|---" * (len(names) + 1) + "|")
-        for key in keys:
-            row = " | ".join(cell(data[n].get(key, "–")) for n in names)
-            print(f"| `{key}` | {row} |")
+        print("| backend | capability | kind | why |")
+        print("|---|---|---|---|")
+        for backend, what, kind, why in rows:
+            why = why.replace("|", "\\|")
+            print(f"| `{backend}` | `{what}` | {kind} | {why} |")
     else:
-        print(f"{'capability':34}" + "".join(f"{n:>11}" for n in names))
-        for key in keys:
-            print(f"{key:34}" + "".join(f"{data[n].get(key, '-'):>11}" for n in names))
+        width = max(len(r[0]) for r in rows)
+        for backend, what, kind, why in rows:
+            print(f"{backend:<{width}}  {kind:<11} {what}")
+            print(f"{'':<{width}}  {'':<11} {why[:100]}")
     return 0
 
 
