@@ -252,18 +252,27 @@ class LabGuest:
 
     def destroy(self) -> None:
         # A rollback or a migration releases the config lock a moment after
-        # its task ends, and stop refuses while it is held - so the stop was
-        # swallowed and delete then failed with "is running".
+        # its task ends, and stop refuses while it is held.
         try:
             wait_for(lambda: not self.config().get("lock"), timeout=120,
                      desc=f"{self.kind} {self.vmid} lock to clear before destroy")
         except Exception:                      # noqa: BLE001 - best effort
             pass
-        try:
-            if self.status() == "running":
-                self.stop()
-        except Exception:                      # noqa: BLE001
-            pass
+
+        # Confirm it is stopped rather than asking once and believing the
+        # answer. A vmstate rollback *resumes* the guest a moment after its
+        # task reports done, so a single status check could see "stopped",
+        # skip the stop, and leave delete to fail with "VM is running -
+        # destroy failed" - which is what it did.
+        for attempt in range(3):
+            try:
+                if self.status() != "stopped":
+                    self.stop()
+                wait_for(lambda: self.status() == "stopped", timeout=60,
+                         desc=f"{self.kind} {self.vmid} to be stopped")
+                break
+            except Exception:                  # noqa: BLE001 - best effort
+                time.sleep(3)
         time.sleep(1)
         error = None
         try:
