@@ -58,34 +58,47 @@ class PVE:
         out = proc.stdout.strip()
         if not out:
             return None
-        try:
-            return json.loads(out)
-        except json.JSONDecodeError:
-            pass
 
-        # A task-starting endpoint streams the task's log to stdout alongside
-        # the UPID, so the whole blob is not JSON - and pvesh exits 0 even when
-        # the task it just watched failed. Returning the blob meant callers
-        # handed wait_for_task something that did not start with "UPID", which
-        # it quietly ignored: a migration could abort and the test would sail
-        # past it, to fail later on something unrelated.
+        missing = object()
+        try:
+            decoded = json.loads(out)
+        except json.JSONDecodeError:
+            decoded = missing
+
+        # Objects and arrays are plain data; nothing below applies to them.
+        if decoded is not missing and not isinstance(decoded, str):
+            return decoded
+
+        # Everything from here is text, and a task-starting endpoint hides the
+        # UPID in it rather than returning it cleanly. pvesh exits 0 even when
+        # the task it watched failed, so missing the UPID means missing the
+        # failure: a migration could abort and the test would sail past it, to
+        # fail much later on something unrelated.
         #
-        # The UPID's position is not dependable. It is on its own last line for
-        # some calls, glued to the end of a warning with no newline for others
-        # ('...enable nesting."UPID:pve-node2:...:vzstart:102:root@pam:"'), and
-        # followed by more log for others still. So: take a JSON line if there
-        # is one, and otherwise pull the last UPID out of the text.
-        for line in reversed(out.splitlines()):
+        # Its position is not dependable, and neither is the shape of the
+        # output. Called against the local node it is streamed log lines with
+        # the UPID last; glued to the end of a warning with no newline for
+        # some calls ('...enable nesting."UPID:...:vzstart:102:root@pam:"');
+        # and - the one that cost a full run to find - when pvesh proxies to
+        # *another* node's endpoint the entire task log comes back as one JSON
+        # string, which parses cleanly and is not a UPID at all. That last
+        # shape is why this cannot simply trust a successful json.loads: the
+        # outbound half of a migration round trip decoded to a UPID and the
+        # return half decoded to the log.
+        text = decoded if decoded is not missing else out
+        if text.startswith("UPID:"):
+            return text
+        for line in reversed(text.splitlines()):
             try:
                 value = json.loads(line.strip())
             except json.JSONDecodeError:
                 continue
             if isinstance(value, str) and value.startswith("UPID:"):
                 return value
-        found = UPID_RE.findall(out)
+        found = UPID_RE.findall(text)
         if found:
             return found[-1]
-        return out
+        return text
 
     # `_timeout` is popped rather than passed to pvesh: an operation that
     # legitimately takes an hour - a migration, a large backup - needs to say
