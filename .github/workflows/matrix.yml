@@ -57,14 +57,16 @@ jobs:
           repository: arki05/pve-bcachefs
           path: pve-bcachefs
 
-      - name: Build the base image if the runner has none
+      # Always built, never reused. A base image carries whatever the
+      # distribution shipped the day it was made, and a variant image carries a
+      # DKMS module built against that kernel - reusing them means a run can
+      # pass against packages nobody has shipped for weeks. The ISO is kept,
+      # since it is a fixed release; everything derived from it is not.
+      - name: Build the base image
         run: |
           set -euo pipefail
-          if [ -f "$PVE_LAB_STATE/images/pve-9.2-1-base.qcow2" ]; then
-            echo "base image present, reusing it"
-          else
-            cd "$GITHUB_WORKSPACE/lab" && make image
-          fi
+          rm -rf "$PVE_LAB_STATE/images" "$PVE_LAB_STATE/build" "$PVE_LAB_STATE/bake"
+          cd "$GITHUB_WORKSPACE/lab" && make image
 
       - name: Prepare the lab
         run: |
@@ -113,6 +115,13 @@ jobs:
         if: always()
         run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --phase teardown || true
 
+      - name: Discard the images
+        if: always()
+        run: |
+          rm -rf "$PVE_LAB_STATE/images" "$PVE_LAB_STATE/build" \
+                 "$PVE_LAB_STATE/bake" "$PVE_LAB_STATE/labs"
+          du -sh "$PVE_LAB_STATE" 2>/dev/null || true
+
   # Its own lab, because libpve-storage-plugin-bcachefs-perl installs
   # PVE/Storage/Custom/BcachefsPlugin.pm and registers the storage type
   # 'bcachefs' - the same file and the same type as pve-bcachefs.
@@ -129,6 +138,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: lab
+
+      - name: Build the base image
+        run: |
+          set -euo pipefail
+          rm -rf "$PVE_LAB_STATE/images" "$PVE_LAB_STATE/build" "$PVE_LAB_STATE/bake"
+          cd "$GITHUB_WORKSPACE/lab" && make image
 
       - name: Prepare
         run: |
@@ -156,3 +171,10 @@ jobs:
       - name: Tear down
         if: always()
         run: cd "$GITHUB_WORKSPACE/lab" && ./bin/lab run --name other --phase teardown || true
+
+      - name: Discard the images
+        if: always()
+        run: |
+          rm -rf "$PVE_LAB_STATE/images" "$PVE_LAB_STATE/build" \
+                 "$PVE_LAB_STATE/bake" "$PVE_LAB_STATE/labs"
+          du -sh "$PVE_LAB_STATE" 2>/dev/null || true
