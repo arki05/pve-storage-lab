@@ -176,19 +176,48 @@ def run_suites(name: str = "lab", only: str | None = None,
     conn.run("rm -rf /root/lab-suite && mkdir -p /root/lab-suite")
     conn.push_dir(ROOT / "suite", "/root/lab-suite")
 
-    def one(label: str, config: str, targets: str) -> None:
+    def one(label: str, config: str, marker: str) -> None:
+        """Run a suite, one test file at a time.
+
+        pytest writes its junit at the end of a session, so a single run over
+        the whole suite keeps every result in memory until then - and a node
+        that dies at 98% takes all of them with it. That is not hypothetical:
+        it cost a ninety-minute run whose only failures were declared ones.
+
+        A file at a time bounds the loss to whatever that file had done, at
+        the cost of a pytest startup each - seconds against hours.
+        """
         nonlocal status
         log.info("running suite: %s", label)
-        command = (f"cd /root/lab-suite && LAB_TEST_CONFIG={config} "
-                   f"python3 -m pytest -v -ra "
-                   f"--junitxml=/root/lab-junit-{label}.xml {extra} {targets}")
-        proc = subprocess.run(
-            conn._base(False) + [command], text=True, timeout=28800)
-        if proc.returncode != 0:
-            status = proc.returncode
-        junit = conn.run(f"cat /root/lab-junit-{label}.xml", check=False)
-        if junit:
-            (results / f"junit-{label}.xml").write_text(junit)
+        listing = conn.run("ls /root/lab-suite/tests/test_*.py", check=False)
+        files = sorted(listing.split())
+        if not files:
+            raise RunError("no test files on the node")
+
+        for path in files:
+            stem = Path(path).stem
+            remote = f"/root/lab-junit-{label}.{stem}.xml"
+            command = (f"cd /root/lab-suite && LAB_TEST_CONFIG={config} "
+                       f"python3 -m pytest -v -ra "
+                       f"--junitxml={remote} {extra} {marker} {shlex.quote(path)}")
+            proc = subprocess.run(
+                conn._base(False) + [command], text=True, timeout=28800)
+            # 5 is "nothing matched the marker in this file", which is the
+            # normal case for most files on the cross pass.
+            if proc.returncode not in (0, 5):
+                status = proc.returncode
+
+            junit = conn.run(f"cat {remote}", check=False)
+            if junit:
+                (results / f"junit-{label}.{stem}.xml").write_text(junit)
+
+            # 255 is ssh: the node is gone, and every later file would only
+            # fail the same way. Stop, and keep what was collected.
+            if proc.returncode == 255:
+                log.error("lost the connection to the node during %s - "
+                          "keeping the %d file(s) already collected",
+                          stem, len(list(results.glob(f"junit-{label}.*.xml"))))
+                break
 
     for profile in plan.profiles:
         if only and only != profile.name:
@@ -198,14 +227,14 @@ def run_suites(name: str = "lab", only: str | None = None,
         # Cross-storage tests belong to the pairwise pass, not to any one
         # storage's run.
         one(profile.name, f"/root/lab-test-{profile.name}.env",
-            "-m 'not crossstorage' tests")
+            "-m 'not crossstorage'")
 
     if plan.cross and (only is None or only == "cross"):
         if len(plan.storages) < 2:
             log.warning("cross needs at least two storages; skipping")
         else:
             first = plan.profiles[0].name
-            one("cross", f"/root/lab-test-{first}.env", "-m crossstorage tests")
+            one("cross", f"/root/lab-test-{first}.env", "-m crossstorage")
 
     return status
 

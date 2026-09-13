@@ -52,8 +52,10 @@ def matches(entry: dict, label: str, test_id: str, markers: set[str]) -> bool:
 
 
 def parse_junit(path: Path) -> tuple[str, list[dict]]:
-    # junit-<label>.xml
-    label = path.stem.removeprefix("junit-")
+    # junit-<label>.xml, or junit-<label>.<test file>.xml when the suite is
+    # run a file at a time. A label never contains a dot; a filename always
+    # introduces one.
+    label = path.stem.removeprefix("junit-").split(".")[0]
     results = []
     for case in ET.parse(path).getroot().iter("testcase"):
         classname = case.get("classname", "")
@@ -116,9 +118,11 @@ def main(argv: list[str]) -> int:
     lines = ["# Storage suite results", ""]
     if not junits:
         lines.append("**No results found.** The run did not get as far as testing.")
+    suites = sorted({parse_junit(j)[0] for j in junits})
     lines.append(
         f"{totals['passed']} passed, {totals['failed']} failed, "
-        f"{totals['skipped']} skipped across {len(junits)} suite(s)."
+        f"{totals['skipped']} skipped across {len(suites)} suite(s): "
+        f"{', '.join(suites)}."
     )
     lines.append("")
 
