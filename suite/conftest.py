@@ -274,11 +274,22 @@ class LabGuest:
             except Exception:                  # noqa: BLE001 - best effort
                 time.sleep(3)
         time.sleep(1)
+
+        # Retried, because the locks destroy needs are not all the guest's.
+        # A vzdump that has not quite finished still holds the cluster lock on
+        # jobs.cfg, and destroy asks for it too - so a backup test could pass
+        # and then fail in teardown with "cfs-lock 'file-jobs_cfg' error: got
+        # lock request timeout". That is contention, not a backend problem,
+        # and waiting a few seconds is the whole fix.
         error = None
-        try:
-            wait_for_task(self.pve, self.pve.delete(self._base, purge=1), 180)
-        except Exception as exc:               # noqa: BLE001
-            error = exc
+        for attempt in range(4):
+            try:
+                wait_for_task(self.pve, self.pve.delete(self._base, purge=1), 180)
+                error = None
+                break
+            except Exception as exc:           # noqa: BLE001
+                error = exc
+                time.sleep(5)
         self.assert_gone(error)
 
     def assert_gone(self, error=None) -> None:
