@@ -93,11 +93,20 @@ jobs:
           [ "${{ github.event.inputs.cross }}" = true ] && suites="$suites cross"
           for s in $suites; do
             echo "::group::suite $s"
-            ./bin/lab run --phase suite --only "$s" -- $PYTEST_ARGS || status=1
+            ./bin/lab run --phase suite --only "$s" -- $PYTEST_ARGS
+            rc=$?
             echo "::endgroup::"
+            # Exit 1 is "tests failed", which Report decides the meaning of.
+            # Anything else - ssh gone at 255, interrupted at 2 - is the lab
+            # breaking rather than a backend, and must not be swallowed: a
+            # partial run would otherwise be reported as a clean one.
+            if [ "$rc" -gt 1 ]; then
+              echo "::error::suite $s exited $rc - the lab broke, not the backend"
+              status=$rc
+              break
+            fi
           done
-          # Not the verdict: report decides, from unexpected failures only.
-          echo "suites finished with $status"
+          exit "$status"
 
       - name: Report
         if: always()
